@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["crates/kestrel"]
+default-members = ["crates/kestrel"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+rust-version = "1.85"
+version = "0.1.0"

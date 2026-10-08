@@ -1,0 +1,10 @@
+[package]
+name = "kestrel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kestrel"
+path = "src/main.rs"
