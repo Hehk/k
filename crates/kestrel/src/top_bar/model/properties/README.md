@@ -16,16 +16,16 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The six generated properties default to 256 cases each. There are also ordinary contract examples and an optional JSON replay test. Each worktree has its own build directory; dependency caches may be reused, but tests must run against that worktree's source.
+The six generated properties default to 256 cases each. There are also ordinary contract examples, retained mutation witnesses, and an optional JSON replay test. Each worktree has its own build directory; dependency caches may be reused, but tests must run against that worktree's source.
 
 | Library | Larger run | Seed for investigation |
 | --- | --- | --- |
 | Hegel 0.49.2 | `HEGEL_TEST_CASES=4096 cargo test properties::generated` | `HEGEL_SEED=7` |
 | Proptest 1.11.0 | `PROPTEST_CASES=4096 cargo test properties::generated` | `PROPTEST_RNG_SEED=7` |
 | QuickCheck 1.1.0 | `QUICKCHECK_TESTS=4096 cargo test properties::generated` | `KESTREL_PBT_SEED=7` |
-| Bolero 0.13.7 | `KESTREL_PBT_CASES=4096 cargo test properties::generated` | Use its reported failure seed/artifact or JSON replay below. |
+| Bolero 0.13.7 | `KESTREL_PBT_CASES=4096 cargo test properties::generated` | `BOLERO_RANDOM_SEED=7` |
 
-Equal seeds do not produce equal inputs across libraries. Defaults retain fresh exploration. For accepted-step and transition counts, set `KESTREL_PBT_STATS=1` and append `-- --nocapture --test-threads=1`; each successful case prints one `PBT_STATS` JSON line. Setup messages are excluded from those counters.
+Equal seeds do not produce equal inputs across libraries. Local defaults retain fresh exploration; Hegel's upstream CI profile uses a derived seed. For accepted-step and transition counts, set `KESTREL_PBT_STATS=1` and append `-- --nocapture --test-threads=1`; each successful case prints one `PBT_STATS` JSON line. Setup messages are excluded from those counters.
 
 The supported development environment is the existing pinned Rust 1.96/Nix shell. The package's declared Rust 1.85 minimum is not newly verified by this experiment. Published Proptest 1.11.0 declares 1.85 (unlike the newer upstream README); Hegel 0.49.2 requires 1.86 for test tooling. Hegel's default build compiles a separate engine shared library and loads it at runtime. Ordinary Bolero tests need no `cargo-bolero` installation; fuzz-engine runs are not part of the comparison.
 
@@ -38,7 +38,11 @@ KESTREL_PBT_REPLAY=/absolute/path/case.json \
   cargo test top_bar::model::properties::replay -- --exact --nocapture
 ```
 
-This bypasses random generation and shrinking and works in every alternative. It replays the semantic input, resolving references deterministically; the printed `TRACE` exposes the actual messages. Preserve the library's own reduced witness/seed as well. When debugging a planted fault, replay against the same fault; the same input must pass once that fault is removed.
+Replay bypasses random generation and shrinking and works in every alternative. It resolves semantic references deterministically; the printed `TRACE` exposes the actual messages. Preserve the library's own reduced witness/seed as well. When debugging a planted fault, replay against the same fault; the same input must pass once that fault is removed.
+
+Set `KESTREL_PBT_FIRST_FAILURE` to a nonexistent file to also capture the original failure before shrinking; an existing file is never overwritten. For clean discovery runs, `HEGEL_DATABASE=disabled` or `PROPTEST_DISABLE_FAILURE_PERSISTENCE=1` disables those libraries' saved-example replay.
+
+The `witnesses/` directory retains each library's original/reduced inputs and the four fault patches. The inputs pass on the correct model and fail with their matching patch. To reproduce in a **disposable worktree**, apply a patch with `git apply`, run its JSON through `replay`, then reverse it with `git apply -R`. Never commit an applied fault. These are test-strength demonstrations, not discovered production regressions.
 
 ## Contracts and domains
 

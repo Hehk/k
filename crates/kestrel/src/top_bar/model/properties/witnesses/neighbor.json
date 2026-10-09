@@ -1,0 +1,19 @@
+{
+  "Lifecycle": {
+    "initial": {
+      "source": 7511038867308865792,
+      "first": 2917206718,
+      "title": "\udb8d\udc45\udae0\uddb5",
+      "count": 8
+    },
+    "operations": [
+      {
+        "Select": 11
+      },
+      "CloseActive",
+      "Add",
+      "Add",
+      "Add"
+    ]
+  }
+}

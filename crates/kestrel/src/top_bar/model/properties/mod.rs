@@ -212,6 +212,17 @@ fn check(case: Case) {
         Case::Geometry(case) => contracts::geometry(&mut trace, case),
     }));
     if let Err(error) = result {
+        if let Some(path) = std::env::var_os("KESTREL_PBT_FIRST_FAILURE") {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file) => serde_json::to_writer_pretty(file, &case).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("cannot record original failure: {error}"),
+            }
+        }
         let reason = error
             .downcast_ref::<String>()
             .map(String::as_str)
@@ -245,6 +256,18 @@ fn replay() {
     if let Ok(path) = std::env::var("KESTREL_PBT_REPLAY") {
         let json = std::fs::read_to_string(path).unwrap();
         check(serde_json::from_str(&json).unwrap());
+    }
+}
+
+#[test]
+fn mutation_witnesses() {
+    for json in [
+        include_str!("witnesses/neighbor.json"),
+        include_str!("witnesses/token.json"),
+        include_str!("witnesses/detach.json"),
+        include_str!("witnesses/boundary.json"),
+    ] {
+        check(serde_json::from_str(json).unwrap());
     }
 }
 
