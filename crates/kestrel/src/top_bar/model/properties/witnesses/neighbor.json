@@ -1,0 +1,17 @@
+{
+  "Lifecycle": {
+    "initial": {
+      "source": 0,
+      "first": 0,
+      "title": "",
+      "count": 2
+    },
+    "operations": [
+      "Add",
+      {
+        "Select": 10
+      },
+      "CloseActive"
+    ]
+  }
+}
