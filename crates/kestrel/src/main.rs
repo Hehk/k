@@ -1,3 +1,5 @@
+#[cfg(any(debug_assertions, feature = "frame-metrics"))]
+mod debug_panel;
 mod top_bar;
 
 use gpui::{
@@ -12,6 +14,8 @@ use top_bar::{
 const TRAFFIC_LIGHT_HEIGHT: f32 = 14.;
 
 struct Kestrel {
+    #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+    debug_panel: Entity<debug_panel::DebugPanel>,
     top_bar: Entity<TopBar>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -28,6 +32,8 @@ impl Kestrel {
             cx.subscribe_in(&top_bar, window, Self::handle_window_command),
         ];
         Self {
+            #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+            debug_panel: cx.new(|_| debug_panel::DebugPanel::default()),
             top_bar,
             focus,
             _subscriptions: subscriptions,
@@ -91,10 +97,11 @@ impl Render for Kestrel {
             .map(|tab| tab.title.clone())
             .unwrap_or_default();
 
-        div()
+        let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::handle_tab_action))
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -127,7 +134,10 @@ impl Render for Kestrel {
                                 .child("Project or review workspace"),
                         ),
                 ),
-            )
+            );
+        #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+        let root = root.child(self.debug_panel.clone());
+        root
     }
 }
 
@@ -179,6 +189,8 @@ fn window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
 }
 
 fn main() {
+    #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+    debug_panel::install();
     Application::new().run(|cx: &mut App| {
         top_bar::bind_keys(cx);
         Kestrel::open(None, cx).unwrap();

@@ -5,8 +5,14 @@ edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[features]
+frame-metrics = []
+
 [dependencies]
 gpui.workspace = true
+profiling = { version = "1", features = ["profile-with-tracing"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
