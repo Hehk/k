@@ -1,0 +1,11 @@
+--- a/crates/kestrel/src/top_bar/model.rs
++++ b/crates/kestrel/src/top_bar/model.rs
+@@ -91,7 +91,7 @@
+         }
+         let pitch = self.tab_width + TAB_GAP;
+         let index = (content_x / pitch).floor() as usize;
+-        (index < self.count && content_x - index as f32 * pitch < self.tab_width).then_some(index)
++        (index < self.count && content_x - index as f32 * pitch <= self.tab_width).then_some(index)
+     }
+ }
+ 

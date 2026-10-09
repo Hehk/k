@@ -1,0 +1,14 @@
+{
+  "Lifecycle": {
+    "initial": {
+      "source": 0,
+      "first": 0,
+      "title": "",
+      "count": 3
+    },
+    "operations": [
+      "Previous",
+      "CloseActive"
+    ]
+  }
+}
