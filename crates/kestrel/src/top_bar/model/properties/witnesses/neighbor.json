@@ -1,0 +1,21 @@
+{
+  "Lifecycle": {
+    "initial": {
+      "source": 0,
+      "first": 0,
+      "title": "",
+      "count": 6
+    },
+    "operations": [
+      {
+        "Close": 0
+      },
+      {
+        "Select": 111
+      },
+      {
+        "Close": 191
+      }
+    ]
+  }
+}
