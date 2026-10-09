@@ -1,0 +1,11 @@
+--- a/crates/kestrel/src/top_bar/model.rs
++++ b/crates/kestrel/src/top_bar/model.rs
+@@ -442,7 +442,7 @@
+                     tab,
+                     token: current,
+                 } = self.phase
+-                    && token == current
++                    && token.source == current.source
+                     && let Some(to) = self.view().layout.slot_at(x, y)
+                     && let Some(from) = self.tab_index(tab)
+                     && from != to

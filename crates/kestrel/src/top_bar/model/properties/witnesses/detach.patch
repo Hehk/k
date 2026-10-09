@@ -1,0 +1,10 @@
+--- a/crates/kestrel/src/top_bar/model.rs
++++ b/crates/kestrel/src/top_bar/model.rs
+@@ -471,6 +471,7 @@
+                             tab: self.tabs[self.tab_index(tab).unwrap()].clone(),
+                             next_tab_id: self.next_tab_id,
+                         }));
++                        self.tabs.retain(|item| item.id != tab);
+                     } else {
+                         self.phase = Phase::Idle;
+                     }
