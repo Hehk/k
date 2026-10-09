@@ -3,13 +3,16 @@ mod debug_panel;
 mod top_bar;
 
 use gpui::{
-    App, Application, Context, Entity, FocusHandle, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, Application, Context, Entity, FocusHandle, KeyBinding, Menu, MenuItem, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px, rgb,
+    size,
 };
 use top_bar::{
     TITLEBAR_HEIGHT, TabAction, TopBar,
     model::{Msg, Tab, WindowCommand},
 };
+
+actions!(kestrel, [Quit]);
 
 const TRAFFIC_LIGHT_HEIGHT: f32 = 14.;
 
@@ -192,6 +195,12 @@ fn main() {
     #[cfg(any(debug_assertions, feature = "frame-metrics"))]
     debug_panel::install();
     Application::new().run(|cx: &mut App| {
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.set_menus(vec![Menu {
+            name: "Kestrel".into(),
+            items: vec![MenuItem::action("Quit Kestrel", Quit)],
+        }]);
         top_bar::bind_keys(cx);
         Kestrel::open(None, cx).unwrap();
         cx.activate(true);
