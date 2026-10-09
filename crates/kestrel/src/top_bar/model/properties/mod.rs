@@ -1,4 +1,5 @@
 mod contracts;
+mod generated;
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -62,9 +63,20 @@ enum Case {
     Geometry(GeometryCase),
 }
 
+#[derive(Default, Serialize)]
+struct Stats {
+    steps: usize,
+    accepted: usize,
+    reorders: usize,
+    detach_success: usize,
+    detach_failure: usize,
+    closes: usize,
+}
+
 struct Trace {
     model: Model,
     messages: Vec<(Msg, Vec<Command>)>,
+    stats: Stats,
 }
 
 impl Trace {
@@ -81,6 +93,7 @@ impl Trace {
                 first + 1,
             ),
             messages: vec![],
+            stats: Stats::default(),
         };
         trace.send(Msg::LayoutChanged(Geometry {
             width: SIDE_WIDTH * 2.
@@ -93,13 +106,25 @@ impl Trace {
             trace.send(Msg::Add);
         }
         trace.settle();
+        trace.stats = Stats::default();
         trace
     }
 
     fn send(&mut self, message: Msg) -> Vec<Command> {
         // Record before updating so a panic inside the reducer still has its input.
         self.messages.push((message.clone(), vec![]));
-        let commands = self.model.update(message);
+        let before = self.model.clone();
+        let commands = self.model.update(message.clone());
+        let changed = before != self.model;
+        self.stats.steps += 1;
+        self.stats.accepted += usize::from(changed || !commands.is_empty());
+        self.stats.reorders += usize::from(matches!(message, Msg::DragMoved { .. }) && changed);
+        self.stats.detach_success +=
+            usize::from(matches!(message, Msg::DetachCompleted { success: true, .. }) && changed);
+        self.stats.detach_failure +=
+            usize::from(matches!(message, Msg::DetachCompleted { success: false, .. }) && changed);
+        self.stats.closes +=
+            usize::from(before.phase != Phase::Closing && self.model.phase == Phase::Closing);
         self.messages.last_mut().unwrap().1 = commands.clone();
         self.invariants();
         commands
@@ -197,6 +222,20 @@ fn check(case: Case) {
             serde_json::to_string(&case).unwrap(),
             trace.messages,
             trace.model
+        );
+    }
+    if std::env::var_os("KESTREL_PBT_STATS").is_some() {
+        let property = match case {
+            Case::Lifecycle(_) => "lifecycle",
+            Case::Drag(_) => "drag",
+            Case::Detach(_) => "detach",
+            Case::Rejected(_) => "rejected",
+            Case::Animation(_) => "animation",
+            Case::Geometry(_) => "geometry",
+        };
+        eprintln!(
+            "PBT_STATS={}",
+            serde_json::json!({"property": property, "stats": trace.stats})
         );
     }
 }
