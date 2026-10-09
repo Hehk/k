@@ -2874,8 +2874,14 @@ dependencies = [
 name = "kestrel"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
+ "git2",
  "gpui",
  "objc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
