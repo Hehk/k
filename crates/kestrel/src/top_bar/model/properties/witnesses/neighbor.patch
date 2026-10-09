@@ -1,0 +1,11 @@
+--- a/crates/kestrel/src/top_bar/model.rs
++++ b/crates/kestrel/src/top_bar/model.rs
+@@ -330,7 +330,7 @@
+             commands.push(Command::Window(WindowCommand::Close));
+         } else {
+             if self.active == Some(id) {
+-                self.active = Some(self.tabs[index.min(self.tabs.len() - 1)].id);
++                self.active = Some(self.tabs[index.saturating_sub(1).min(self.tabs.len() - 1)].id);
+             }
+             commands.push(Command::Reveal(self.active.unwrap()));
+             self.animate(from, commands);
