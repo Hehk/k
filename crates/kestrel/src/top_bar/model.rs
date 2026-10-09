@@ -501,4 +501,6 @@ impl Model {
 }
 
 #[cfg(test)]
+mod properties;
+#[cfg(test)]
 mod tests;
