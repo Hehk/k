@@ -2876,6 +2876,8 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "objc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
