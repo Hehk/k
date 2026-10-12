@@ -1,4 +1,4 @@
-use gpui::{AppContext, Modifiers, TestAppContext};
+use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
 use kestrel::{review::RefName, state::AppState, storage::Store};
 
 use super::*;
@@ -23,6 +23,180 @@ fn active(workspace: &Entity<Workspace>, index: usize, cx: &TestAppContext) -> T
     workspace.read_with(cx, |workspace, _| {
         workspace.state().windows()[index].active_tab.unwrap()
     })
+}
+
+fn redraw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn back_forward_buttons_and_shortcuts_navigate_only_the_selected_tab(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = shared(cx, dir.path().join("state.json"));
+    cx.update(|cx| {
+        cx.set_global(crate::workspace::Session(workspace.clone()));
+        commands::install(cx);
+    });
+    let handle = cx.update(|cx| Kestrel::new_window(workspace.clone(), cx).unwrap());
+    let tab = active(&workspace, 0, cx);
+    let one = repository(&dir.path().join("one"));
+    let two = repository(&dir.path().join("two"));
+    handle
+        .update(cx, |root, _, cx| open(root, one, cx))
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .update(cx, |root, _, cx| open(root, two, cx))
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    redraw(cx);
+    let back = cx.debug_bounds("navigate-back").unwrap().center();
+    let forward = cx.debug_bounds("navigate-forward").unwrap().center();
+    cx.simulate_click(back, Modifiers::none());
+    redraw(cx);
+    handle
+        .read_with(cx, |root, cx| {
+            assert_eq!(root.top_bar.read(cx).active_tab().unwrap().title, "one")
+        })
+        .unwrap();
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    handle
+        .read_with(cx, |root, cx| {
+            assert_eq!(root.top_bar.read(cx).active_tab().unwrap().title, "Home")
+        })
+        .unwrap();
+    let before = workspace.read_with(cx, |workspace, _| workspace.state().clone());
+    cx.simulate_click(back, Modifiers::none());
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace.state().clone()),
+        before
+    );
+    cx.simulate_click(forward, Modifiers::none());
+    cx.simulate_keystrokes("cmd-]");
+    redraw(cx);
+    handle
+        .read_with(cx, |root, cx| {
+            assert_eq!(root.top_bar.read(cx).active_tab().unwrap().title, "two")
+        })
+        .unwrap();
+    let saved = workspace.read_with(cx, |workspace, _| {
+        workspace.state().tab(tab).unwrap().clone()
+    });
+    cx.simulate_keystrokes("cmd-t cmd-[ cmd-]");
+    redraw(cx);
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.state().tab(tab).unwrap(), &saved);
+        let window = &workspace.state().windows()[0];
+        let current = workspace.state().tab(window.active_tab.unwrap()).unwrap();
+        assert_ne!(current.id, tab);
+        assert_eq!(current.route, Route::Home);
+        assert!(!current.can_go_back());
+        assert!(!current.can_go_forward());
+    });
+    cx.simulate_keystrokes("cmd-shift-[");
+    redraw(cx);
+    handle
+        .read_with(cx, |root, cx| {
+            assert_eq!(root.top_bar.read(cx).active_tab().unwrap().id, tab.as_u64())
+        })
+        .unwrap();
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .clone()),
+        saved
+    );
+}
+
+#[gpui::test]
+fn navigation_commands_are_disabled_during_repository_opening(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = shared(cx, dir.path().join("state.json"));
+    cx.update(|cx| {
+        cx.set_global(crate::workspace::Session(workspace.clone()));
+        commands::install(cx);
+    });
+    let handle = cx.update(|cx| Kestrel::new_window(workspace.clone(), cx).unwrap());
+    let info = repository(&dir.path().join("repo"));
+    handle
+        .update(cx, |root, _, cx| open(root, info, cx))
+        .unwrap();
+    let tab = active(&workspace, 0, cx);
+    workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    state.go_home(tab)?;
+                    state.go_back(tab)
+                },
+                cx,
+            )
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let before = workspace.read_with(cx, |workspace, _| workspace.state().clone());
+    let target = handle
+        .update(cx, |root, window, cx| {
+            window.activate_window();
+            assert!(root.navigation_allowed(Command::Back, cx));
+            assert!(root.navigation_allowed(Command::Forward, cx));
+            let target = root.open_target(cx).unwrap();
+            root.opening = Some(target.clone());
+            root.command(Command::Back, window, cx);
+            root.command(Command::Forward, window, cx);
+            cx.notify();
+            target
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        for state in commands::menu_state(cx)
+            .iter()
+            .filter(|state| state.menu == "Go")
+        {
+            assert!(!state.enabled);
+        }
+        cx.dispatch_action(&Command::Back);
+        cx.dispatch_action(&Command::Forward);
+    });
+    cx.run_until_parked();
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    redraw(cx);
+    for id in ["navigate-back", "navigate-forward"] {
+        let point = cx.debug_bounds(id).unwrap().center();
+        cx.simulate_click(point, Modifiers::none());
+    }
+    cx.simulate_keystrokes("cmd-[ cmd-]");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace.state().clone()),
+        before
+    );
+    handle
+        .update(cx, |root, _, cx| root.finish_open(target, Ok(None), cx))
+        .unwrap();
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .route
+            .clone()),
+        Route::Home
+    );
 }
 
 #[gpui::test]
@@ -517,6 +691,9 @@ fn clean_quit_preserves_home_and_independent_pinned_contexts(cx: &mut TestAppCon
                             },
                         )?;
                     }
+                    let first = state.windows()[0].tabs[0].id;
+                    state.go_home(first)?;
+                    state.go_back(first)?;
                     state.new_tab(state.windows()[0].id)?;
                     Ok(())
                 },

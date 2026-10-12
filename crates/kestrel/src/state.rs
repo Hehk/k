@@ -177,6 +177,33 @@ impl Route {
 pub struct Tab {
     pub id: TabId,
     pub route: Route,
+    #[serde(default)]
+    back: Vec<Route>,
+    #[serde(default)]
+    forward: Vec<Route>,
+}
+
+impl Tab {
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
+    fn routes(&self) -> impl Iterator<Item = &Route> {
+        std::iter::once(&self.route)
+            .chain(&self.back)
+            .chain(&self.forward)
+    }
+
+    fn visit(&mut self, route: Route) {
+        if self.route != route {
+            self.back.push(std::mem::replace(&mut self.route, route));
+            self.forward.clear();
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +443,8 @@ impl AppState {
         window.tabs.push(Tab {
             id,
             route: Route::Home,
+            back: Vec::new(),
+            forward: Vec::new(),
         });
         window.active_tab = Some(id);
         self.active_window = Some(window.id);
@@ -426,22 +455,23 @@ impl AppState {
         &mut self,
         window: WindowId,
         index: usize,
-        route: Route,
+        mut tab: Tab,
     ) -> Result<TabId, StateError> {
         self.window(window)?;
-        if let Route::Repository { project, review } = &route {
-            self.project(*project)?;
-            review.check_loaded()?;
+        for route in tab.routes() {
+            if let Route::Repository { project, review } = route {
+                self.project(*project)?;
+                review.check_loaded()?;
+            }
         }
         let id = TabId(self.allocate()?);
+        tab.id = id;
         let window = self
             .windows
             .iter_mut()
             .find(|item| item.id == window)
             .expect("destination window was validated");
-        window
-            .tabs
-            .insert(index.min(window.tabs.len()), Tab { id, route });
+        window.tabs.insert(index.min(window.tabs.len()), tab);
         window.active_tab = Some(id);
         self.active_window = Some(window.id);
         Ok(id)
@@ -461,7 +491,7 @@ impl AppState {
     pub fn go_home(&mut self, tab: TabId) -> Result<(), StateError> {
         self.tab(tab)?;
         self.remember_tab(tab);
-        self.tab_mut(tab)?.route = Route::Home;
+        self.tab_mut(tab)?.visit(Route::Home);
         Ok(())
     }
 
@@ -471,7 +501,28 @@ impl AppState {
             return Ok(());
         }
         self.remember_tab(tab);
-        self.tab_mut(tab)?.route = Route::Repository { project, review };
+        self.tab_mut(tab)?
+            .visit(Route::Repository { project, review });
+        Ok(())
+    }
+
+    pub fn go_back(&mut self, id: TabId) -> Result<(), StateError> {
+        let tab = self.tab_mut(id)?;
+        let Some(route) = tab.back.pop() else {
+            return Ok(());
+        };
+        tab.forward.push(std::mem::replace(&mut tab.route, route));
+        self.remember_tab(id);
+        Ok(())
+    }
+
+    pub fn go_forward(&mut self, id: TabId) -> Result<(), StateError> {
+        let tab = self.tab_mut(id)?;
+        let Some(route) = tab.forward.pop() else {
+            return Ok(());
+        };
+        tab.back.push(std::mem::replace(&mut tab.route, route));
+        self.remember_tab(id);
         Ok(())
     }
 
@@ -584,11 +635,13 @@ impl AppState {
                 if !ids.insert(tab.id.0) {
                     return Err(StateError("duplicate tab ID"));
                 }
-                if let Route::Repository { project, review } = &tab.route {
-                    if !projects.contains(project) {
-                        return Err(StateError("unknown route project"));
+                for route in tab.routes() {
+                    if let Route::Repository { project, review } = route {
+                        if !projects.contains(project) {
+                            return Err(StateError("unknown route project"));
+                        }
+                        review.check_loaded()?;
                     }
-                    review.check_loaded()?;
                 }
             }
             match window.active_tab {

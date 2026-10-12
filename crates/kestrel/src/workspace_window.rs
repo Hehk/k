@@ -6,7 +6,7 @@ use gpui::{
 };
 use kestrel::{
     git::{Repository, RepositoryInfo},
-    state::{ProjectId, Route, StateError, TabId, WindowId},
+    state::{ProjectId, Route, StateError, Tab, TabId, WindowId},
 };
 
 use crate::{
@@ -158,6 +158,20 @@ impl Kestrel {
         self.commands_allowed(cx) && self.top_bar.read(cx).allows(action)
     }
 
+    fn active_tab<'a>(&self, cx: &'a App) -> Option<&'a Tab> {
+        let state = self.workspace.read(cx).state();
+        state.tab(state.window(self.id).ok()?.active_tab?).ok()
+    }
+
+    pub fn navigation_allowed(&self, command: Command, cx: &App) -> bool {
+        self.commands_allowed(cx)
+            && self.active_tab(cx).is_some_and(|tab| match command {
+                Command::Back => tab.can_go_back(),
+                Command::Forward => tab.can_go_forward(),
+                _ => false,
+            })
+    }
+
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace
             .update(cx, |workspace, cx| workspace.close_window(self.id, cx));
@@ -169,6 +183,25 @@ impl Kestrel {
             return;
         }
         match command {
+            Command::Back | Command::Forward if self.navigation_allowed(command, cx) => {
+                let Some(tab) = self.active_tab(cx).map(|tab| tab.id) else {
+                    return;
+                };
+                let result = self.workspace.update(cx, |workspace, cx| {
+                    workspace.edit(
+                        |state| {
+                            if command == Command::Back {
+                                state.go_back(tab)
+                            } else {
+                                state.go_forward(tab)
+                            }
+                        },
+                        cx,
+                    )
+                });
+                self.error = result.err().map(|error| error.to_string());
+                cx.notify();
+            }
             Command::CloseWindow => self.close(window, cx),
             Command::Minimize if !window.is_fullscreen() => window.minimize_window(),
             Command::Zoom if !window.is_fullscreen() => window.zoom_window(),
@@ -264,6 +297,24 @@ impl Kestrel {
         self.workspace
             .update(cx, |workspace, cx| workspace.replace(state, cx));
         Ok(())
+    }
+
+    fn navigation_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        command: Command,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let enabled = self.navigation_allowed(command, cx);
+        button(id, label)
+            .debug_selector(move || id.into())
+            .when(!enabled, |this| this.opacity(0.4).cursor_default())
+            .when(enabled, |this| {
+                this.on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(command), cx);
+                })
+            })
     }
 
     fn open_saved(&mut self, project: ProjectId, cx: &mut Context<Self>) {
@@ -454,12 +505,7 @@ impl Render for Kestrel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         commands::refresh_later(cx);
         let workspace = self.workspace.read(cx);
-        let tab = workspace
-            .state()
-            .window(self.id)
-            .ok()
-            .and_then(|window| window.active_tab)
-            .and_then(|id| workspace.state().tab(id).ok());
+        let tab = self.active_tab(cx);
         let project = tab
             .and_then(|tab| tab.route.project())
             .and_then(|id| workspace.state().project(id).ok());
@@ -519,6 +565,7 @@ impl Render for Kestrel {
             .child(
                 div()
                     .id("content-frame")
+                    .relative()
                     .flex_1()
                     .mx_2()
                     .mb_2()
@@ -532,6 +579,26 @@ impl Render for Kestrel {
                     .border_1()
                     .border_color(rgb(0xe0e1e4))
                     .bg(rgb(0xffffff))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_3()
+                            .left_3()
+                            .flex()
+                            .gap_2()
+                            .child(self.navigation_button(
+                                "navigate-back",
+                                "Back",
+                                Command::Back,
+                                cx,
+                            ))
+                            .child(self.navigation_button(
+                                "navigate-forward",
+                                "Forward",
+                                Command::Forward,
+                                cx,
+                            )),
+                    )
                     .child(div().text_lg().child(title))
                     .when_some(directory.clone(), |this, directory| {
                         this.child(div().text_sm().text_color(rgb(0x777980)).child(directory))

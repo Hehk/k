@@ -51,6 +51,158 @@ fn new_tabs_are_home_routes_with_no_repository_side_effects() {
 }
 
 #[test]
+fn history_moves_both_ways_and_new_destinations_discard_the_forward_stack() {
+    let mut state = AppState::default();
+    let a = state.register_project(&info("a", "refs/heads/a")).unwrap();
+    let b = state.register_project(&info("b", "refs/heads/b")).unwrap();
+    let c = state.register_project(&info("c", "refs/heads/c")).unwrap();
+    let window = state.new_window().unwrap();
+    let tab = state.new_tab(window).unwrap();
+    let start = state.clone();
+    state.go_back(tab).unwrap();
+    state.go_forward(tab).unwrap();
+    assert_eq!(state, start);
+    state.open_project(a, tab).unwrap();
+    state.open_project(b, tab).unwrap();
+    state.go_back(tab).unwrap();
+    assert_eq!(state.tab(tab).unwrap().route.project(), Some(a));
+    let before = state.clone();
+    state.open_project(a, tab).unwrap();
+    assert_eq!(state, before);
+    state.go_back(tab).unwrap();
+    assert_eq!(state.tab(tab).unwrap().route, Route::Home);
+    assert!(!state.tab(tab).unwrap().can_go_back());
+    assert!(state.tab(tab).unwrap().can_go_forward());
+    let before = state.clone();
+    state.go_home(tab).unwrap();
+    state.go_back(tab).unwrap();
+    assert_eq!(state, before);
+    state.go_forward(tab).unwrap();
+    state.go_forward(tab).unwrap();
+    assert_eq!(state.tab(tab).unwrap().route.project(), Some(b));
+    let before = state.clone();
+    state.go_forward(tab).unwrap();
+    assert_eq!(state, before);
+    state.go_back(tab).unwrap();
+    state.open_project(c, tab).unwrap();
+    assert!(!state.tab(tab).unwrap().can_go_forward());
+    assert_eq!(state.tab(tab).unwrap().back.len(), 2);
+    state.go_back(tab).unwrap();
+    assert_eq!(state.tab(tab).unwrap().route.project(), Some(a));
+    assert_round_trip(&state);
+}
+
+#[test]
+fn history_preserves_exact_reviews_independently_and_moves_with_the_tab() {
+    let mut state = AppState::default();
+    let a = state.register_project(&info("a", "refs/heads/a")).unwrap();
+    let b = state.register_project(&info("b", "refs/heads/b")).unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, a, window);
+    state
+        .set_comparison(tab, BaseSelection::Default, comparison("refs/heads/a"))
+        .unwrap();
+    state
+        .set_browsing(
+            tab,
+            &"refs/heads/a".into(),
+            Browsing {
+                file: Some("saved.rs".into()),
+                mode: ReadingMode::HeadFile,
+                first_visible_line: 80,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let expected = state.tab(tab).unwrap().route.clone();
+    state.open_project(b, tab).unwrap();
+    let sibling = open(&mut state, a, window);
+    state
+        .select_branch(sibling, "refs/heads/new-selection".into())
+        .unwrap();
+    let sibling_before = state.tab(sibling).unwrap().clone();
+    state.go_back(tab).unwrap();
+    assert_eq!(state.tab(tab).unwrap().route, expected);
+    assert_eq!(state.tab(sibling).unwrap(), &sibling_before);
+    assert_eq!(state.window(window).unwrap().active_tab, Some(sibling));
+    let saved = state.tab(tab).unwrap().clone();
+    let target = state.new_window().unwrap();
+    state.move_tab(tab, target, 0).unwrap();
+    assert_eq!(state.tab(tab).unwrap(), &saved);
+    assert_round_trip(&state);
+    let mut restored: AppState =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    restored.go_forward(tab).unwrap();
+    assert_eq!(restored.tab(tab).unwrap().route.project(), Some(b));
+    restored.go_back(tab).unwrap();
+    assert_eq!(restored.tab(tab).unwrap().route, expected);
+}
+
+#[test]
+fn inserting_a_tab_validates_its_entire_history_before_mutating_state() {
+    for forward in [false, true] {
+        let mut source = AppState::default();
+        let project = source.register_project(&info("a", "refs/heads/a")).unwrap();
+        let window = source.new_window().unwrap();
+        let tab = open(&mut source, project, window);
+        source.go_home(tab).unwrap();
+        if forward {
+            source.go_back(tab).unwrap();
+            source.go_back(tab).unwrap();
+        }
+        let tab = source.tab(tab).unwrap().clone();
+        assert_eq!(tab.route, Route::Home);
+        let mut target = AppState::default();
+        let window = target.new_window().unwrap();
+        let before = target.clone();
+        assert!(target.insert_tab(window, 0, tab).is_err());
+        assert_eq!(target, before);
+    }
+}
+
+#[test]
+fn saved_tabs_without_history_start_with_empty_stacks() {
+    let mut state = AppState::default();
+    let project = state.register_project(&info("a", "refs/heads/a")).unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
+    let mut json = serde_json::to_value(&state).unwrap();
+    let saved = json["windows"][0]["tabs"][0].as_object_mut().unwrap();
+    saved.remove("back");
+    saved.remove("forward");
+    let restored: AppState = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        restored.tab(tab).unwrap().route,
+        state.tab(tab).unwrap().route
+    );
+    assert!(!restored.tab(tab).unwrap().can_go_back());
+    assert!(!restored.tab(tab).unwrap().can_go_forward());
+}
+
+#[test]
+fn deserialization_checks_history_routes_as_well_as_the_current_route() {
+    let mut state = AppState::default();
+    let project = state.register_project(&info("a", "refs/heads/a")).unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
+    let route = serde_json::to_value(&state.tab(tab).unwrap().route).unwrap();
+    for stack in ["back", "forward"] {
+        for bad_path in [false, true] {
+            let mut route = route.clone();
+            if bad_path {
+                route["Repository"]["review"]["reviews"][0]["browsing"]["file"] =
+                    serde_json::to_value(GitPath::from("../outside")).unwrap();
+            } else {
+                route["Repository"]["project"] = serde_json::json!(999);
+            }
+            let mut json = serde_json::to_value(&state).unwrap();
+            json["windows"][0]["tabs"][0][stack] = serde_json::json!([route]);
+            assert!(serde_json::from_value::<AppState>(json).is_err());
+        }
+    }
+}
+
+#[test]
 fn focusing_a_window_changes_only_focus_and_rejects_closed_windows() {
     let mut state = AppState::default();
     let first = state.new_window().unwrap();
@@ -364,6 +516,8 @@ fn rejected_transitions_leave_the_model_unchanged() {
     assert!(state.open_project(project, TabId(100)).is_err());
     assert!(state.open_project(ProjectId(100), home).is_err());
     assert!(state.go_home(TabId(100)).is_err());
+    assert!(state.go_back(TabId(100)).is_err());
+    assert!(state.go_forward(TabId(100)).is_err());
     assert!(state.select_tab(TabId(100)).is_err());
     assert!(state.move_tab(tab, WindowId(100), 0).is_err());
     assert!(state.select_branch(home, "refs/heads/a".into()).is_err());
@@ -426,7 +580,7 @@ fn generated_transitions_preserve_selections_identities_and_serializability() {
             }
             let tab = state.window(window).unwrap().tabs[0].id;
             let project = projects[(random >> 32) as usize % projects.len()];
-            match random % 9 {
+            match random % 11 {
                 0 => {
                     state.new_window().unwrap();
                 }
@@ -448,6 +602,8 @@ fn generated_transitions_preserve_selections_identities_and_serializability() {
                 7 => {
                     state.select_tab(tab).unwrap();
                 }
+                8 => state.go_back(tab).unwrap(),
+                9 => state.go_forward(tab).unwrap(),
                 _ => {
                     state.open_project(project, tab).unwrap();
                     let name = format!("refs/heads/branch-{}", step % 3);

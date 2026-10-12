@@ -30,6 +30,54 @@ fn open(cx: &mut TestAppContext) -> WindowHandle<Kestrel> {
     handle
 }
 
+fn navigation_history(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Kestrel>,
+    path: &std::path::Path,
+) {
+    git2::Repository::init(path).unwrap();
+    let info = kestrel::git::Repository::open(path)
+        .unwrap()
+        .info()
+        .unwrap();
+    let window = handle.read_with(cx, |root, _| root.id()).unwrap();
+    cx.update(|cx| {
+        let workspace = cx.global::<Session>().0.clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .edit(
+                    |state| {
+                        let tab = state.window(window)?.active_tab.unwrap();
+                        let project = state.register_project(&info)?;
+                        state.open_project(project, tab)?;
+                        state.go_home(tab)?;
+                        state.go_back(tab)
+                    },
+                    cx,
+                )
+                .unwrap()
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn assert_navigation_enabled(cx: &mut TestAppContext, back: bool, forward: bool) {
+    cx.update(|cx| {
+        let states = menu_state(cx);
+        for (label, enabled) in [("Back", back), ("Forward", forward)] {
+            assert_eq!(
+                states
+                    .iter()
+                    .find(|state| state.label == label)
+                    .unwrap()
+                    .enabled,
+                enabled,
+                "{label}"
+            );
+        }
+    });
+}
+
 fn snapshot(cx: &mut TestAppContext) -> kestrel::state::AppState {
     cx.update(|cx| cx.global::<Session>().0.read(cx).state().clone())
 }
@@ -66,6 +114,8 @@ fn zero_window_commands_and_menu_enablement(cx: &mut TestAppContext) {
             "Close Window",
             "Reopen Closed Tab or Window",
             "Minimize",
+            "Back",
+            "Forward",
         ] {
             assert!(
                 !states
@@ -75,6 +125,8 @@ fn zero_window_commands_and_menu_enablement(cx: &mut TestAppContext) {
                     .enabled
             );
         }
+        cx.dispatch_action(&Command::Back);
+        cx.dispatch_action(&Command::Forward);
         cx.dispatch_action(&TabAction::New);
     });
     cx.run_until_parked();
@@ -98,6 +150,53 @@ fn zero_window_commands_and_menu_enablement(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(cx.windows().len(), 1));
+}
+
+#[gpui::test]
+fn navigation_menus_and_shortcuts_follow_the_front_window_and_survive_reopening(
+    cx: &mut TestAppContext,
+) {
+    let dir = setup(cx);
+    let a = open(cx);
+    navigation_history(cx, a, &dir.path().join("a"));
+    let a_before = snapshot(cx).windows()[0].clone();
+    let b = open(cx);
+    navigation_history(cx, b, &dir.path().join("b"));
+    let b_before = snapshot(cx).windows()[1].clone();
+    assert_navigation_enabled(cx, true, true);
+    menu_action(cx, "Back");
+    assert_navigation_enabled(cx, false, true);
+    assert_eq!(snapshot(cx).windows()[0], a_before);
+    cx.simulate_keystrokes(b.into(), "cmd-]");
+    cx.run_until_parked();
+    assert_eq!(snapshot(cx).windows()[1], b_before);
+    menu_action(cx, "Forward");
+    assert_navigation_enabled(cx, true, false);
+    let b_after = snapshot(cx).windows()[1].clone();
+    a.update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_navigation_enabled(cx, true, true);
+    cx.simulate_keystrokes(a.into(), "cmd-[");
+    cx.run_until_parked();
+    assert_navigation_enabled(cx, false, true);
+    assert_eq!(snapshot(cx).windows()[1], b_after);
+    cx.simulate_keystrokes(a.into(), "cmd-]");
+    cx.run_until_parked();
+    assert_eq!(snapshot(cx).windows()[0], a_before);
+    menu_action(cx, "Close Window");
+    b.update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    menu_action(cx, "Reopen Closed Tab or Window");
+    assert_navigation_enabled(cx, true, true);
+    let restored = snapshot(cx).windows()[1].tabs[0].clone();
+    let mut expected = a_before.tabs[0].clone();
+    assert_ne!(restored.id, expected.id);
+    expected.id = restored.id;
+    assert_eq!(restored, expected);
+    menu_action(cx, "Back");
+    assert_navigation_enabled(cx, false, true);
+    assert_eq!(snapshot(cx).windows()[0], b_after);
 }
 
 #[gpui::test]
@@ -249,10 +348,12 @@ fn quit_binding_and_shutdown_preserve_open_contexts(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn standard_bindings_do_not_claim_system_window_cycling_or_navigation(cx: &mut TestAppContext) {
+fn standard_bindings_leave_system_window_and_desktop_navigation_unclaimed(cx: &mut TestAppContext) {
     let _dir = setup(cx);
     cx.update(|cx| {
         for (key, command) in [
+            ("cmd-[", Command::Back),
+            ("cmd-]", Command::Forward),
             ("cmd-n", Command::NewWindow),
             ("cmd-shift-w", Command::CloseWindow),
             ("cmd-alt-w", Command::CloseAllWindows),
@@ -268,15 +369,7 @@ fn standard_bindings_do_not_claim_system_window_cycling_or_navigation(cx: &mut T
             assert_eq!(bindings.len(), 1, "{key}");
             assert!(bindings[0].action().partial_eq(&command), "{key}");
         }
-        for key in [
-            "cmd-`",
-            "cmd-shift-`",
-            "cmd-tab",
-            "cmd-[",
-            "cmd-]",
-            "ctrl-left",
-            "ctrl-right",
-        ] {
+        for key in ["cmd-`", "cmd-shift-`", "cmd-tab", "ctrl-left", "ctrl-right"] {
             assert!(
                 cx.all_bindings_for_input(&[gpui::Keystroke::parse(key).unwrap()])
                     .is_empty(),
@@ -289,9 +382,11 @@ fn standard_bindings_do_not_claim_system_window_cycling_or_navigation(cx: &mut T
 #[gpui::test]
 fn menus_and_commands_are_guarded_during_a_tab_drag(cx: &mut TestAppContext) {
     use crate::top_bar::model::{DragToken, Msg};
-    let _dir = setup(cx);
+    let dir = setup(cx);
     let window = open(cx);
     cx.simulate_keystrokes(window.into(), "cmd-t");
+    navigation_history(cx, window, &dir.path().join("repo"));
+    assert_navigation_enabled(cx, true, true);
     let token = window
         .update(cx, |root, window, cx| {
             let bar = root.top_bar.clone();
@@ -324,6 +419,8 @@ fn menus_and_commands_are_guarded_during_a_tab_drag(cx: &mut TestAppContext) {
             "Close All Windows",
             "Move Tab Left",
             "Move Tab to New Window",
+            "Back",
+            "Forward",
         ] {
             assert!(
                 !states
@@ -335,8 +432,13 @@ fn menus_and_commands_are_guarded_during_a_tab_drag(cx: &mut TestAppContext) {
             );
         }
     });
-    cx.simulate_keystrokes(window.into(), "cmd-t cmd-w cmd-9 cmd-shift-w cmd-alt-w");
+    cx.simulate_keystrokes(
+        window.into(),
+        "cmd-t cmd-w cmd-9 cmd-shift-w cmd-alt-w cmd-[ cmd-]",
+    );
     cx.run_until_parked();
+    menu_action(cx, "Back");
+    menu_action(cx, "Forward");
     assert_eq!(snapshot(cx), before);
     window
         .update(cx, |root, window, cx| {
@@ -358,7 +460,7 @@ fn menus_expose_the_expected_commands_once() {
             .iter()
             .map(|menu| menu.name.as_ref())
             .collect::<Vec<_>>(),
-        ["Kestrel", "File", "Window"]
+        ["Kestrel", "File", "Go", "Window"]
     );
     let mut names = std::collections::HashSet::new();
     for item in menus.into_iter().flat_map(|menu| menu.items) {
@@ -370,6 +472,8 @@ fn menus_expose_the_expected_commands_once() {
         }
     }
     for name in [
+        "Back",
+        "Forward",
         "New Window",
         "New Tab",
         "Close Tab",

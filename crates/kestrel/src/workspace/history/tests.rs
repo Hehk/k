@@ -2,7 +2,7 @@ use super::*;
 use kestrel::{
     git::RepositoryInfo,
     review::RefName,
-    state::{Browsing, ReadingMode},
+    state::{Browsing, ReadingMode, Route},
 };
 
 #[test]
@@ -33,6 +33,8 @@ fn reopen_restores_exact_review_not_the_projects_newer_defaults() {
             },
         )
         .unwrap();
+    before.go_home(closed).unwrap();
+    before.go_back(closed).unwrap();
     let route = before.tab(closed).unwrap().route.clone();
     let mut after = before.clone();
     after.close_tab(closed);
@@ -49,8 +51,18 @@ fn reopen_restores_exact_review_not_the_projects_newer_defaults() {
     assert_eq!(tabs[2].id, last);
     assert_ne!(tabs[1].id, closed);
     assert_eq!(tabs[1].route, route);
-    assert_eq!(after.window(window).unwrap().active_tab, Some(tabs[1].id));
+    let restored = tabs[1].id;
+    let mut expected = before.tab(closed).unwrap().clone();
+    expected.id = restored;
+    assert_eq!(tabs[1], expected);
+    assert_eq!(after.window(window).unwrap().active_tab, Some(restored));
     assert!(after.tab(closed).is_err());
+    after.go_back(restored).unwrap();
+    assert_eq!(after.tab(restored).unwrap().route, Route::Home);
+    after.go_forward(restored).unwrap();
+    assert_eq!(after.tab(restored).unwrap().route, route);
+    after.go_forward(restored).unwrap();
+    assert_eq!(after.tab(restored).unwrap().route, Route::Home);
     let encoded = serde_json::to_vec(&after).unwrap();
     assert_eq!(serde_json::from_slice::<AppState>(&encoded).unwrap(), after);
 }
@@ -63,6 +75,17 @@ fn window_recovery_restores_order_and_selection_in_a_new_window() {
     before.new_tab(window).unwrap();
     before.new_tab(window).unwrap();
     before.select_tab(first).unwrap();
+    let directory = std::env::temp_dir().join("history-window");
+    let project = before
+        .register_project(&RepositoryInfo {
+            common_dir: directory.join(".git"),
+            directory,
+            current_branch: None,
+        })
+        .unwrap();
+    before.open_project(project, first).unwrap();
+    before.go_home(first).unwrap();
+    before.go_back(first).unwrap();
     let other = before.new_window().unwrap();
     before.new_tab(other).unwrap();
     let mut after = before.clone();
@@ -76,6 +99,12 @@ fn window_recovery_restores_order_and_selection_in_a_new_window() {
     assert_eq!(tabs.len(), 3);
     assert_eq!(after.window(restored).unwrap().active_tab, Some(tabs[0].id));
     assert_eq!(after.window(other).unwrap(), before.window(other).unwrap());
+    for (old, new) in before.window(window).unwrap().tabs.iter().zip(tabs) {
+        let mut expected = old.clone();
+        assert_ne!(expected.id, new.id);
+        expected.id = new.id;
+        assert_eq!(&expected, new);
+    }
 }
 
 #[test]
@@ -97,11 +126,14 @@ fn detachment_reordering_and_route_navigation_do_not_create_closed_history() {
 
 #[test]
 fn a_closed_tab_can_reopen_without_a_window_and_clamps_its_original_position() {
+    let mut state = AppState::default();
+    let window = state.new_window().unwrap();
+    let tab = state.new_tab(window).unwrap();
     let closed = Closed::Tab {
         index: 5,
-        route: Route::Home,
+        tab: state.tab(tab).unwrap().clone(),
     };
-    let mut state = AppState::default();
+    state.close_window(window);
     let window = closed.restore(&mut state, None).unwrap();
     assert_eq!(state.window(window).unwrap().tabs.len(), 1);
     closed.restore(&mut state, Some(window)).unwrap();

@@ -16,6 +16,8 @@ pub enum Command {
     CloseAllWindows,
     ReopenClosed,
     DetachTab,
+    Back,
+    Forward,
     Minimize,
     MinimizeAll,
     Zoom,
@@ -46,6 +48,8 @@ pub fn install(cx: &mut App) {
     cx.set_global(Installed::default());
     top_bar::bind_keys(cx);
     cx.bind_keys([
+        KeyBinding::new("cmd-[", Command::Back, Some("Workspace")),
+        KeyBinding::new("cmd-]", Command::Forward, Some("Workspace")),
         KeyBinding::new("cmd-n", Command::NewWindow, None),
         KeyBinding::new("cmd-shift-w", Command::CloseWindow, None),
         KeyBinding::new("cmd-alt-w", Command::CloseAllWindows, None),
@@ -98,6 +102,13 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Close Tab", TabAction::Close),
                 MenuItem::action("Close Window", Command::CloseWindow),
                 MenuItem::action("Close All Windows", Command::CloseAllWindows),
+            ],
+        },
+        Menu {
+            name: "Go".into(),
+            items: vec![
+                MenuItem::action("Back", Command::Back),
+                MenuItem::action("Forward", Command::Forward),
             ],
         },
         Menu {
@@ -227,6 +238,9 @@ pub fn menu_state(cx: &mut App) -> Vec<MenuState> {
                 let mut title = name.clone();
                 let enabled = if let Some(command) = action.as_any().downcast_ref::<Command>() {
                     match command {
+                        Command::Back | Command::Forward => {
+                            root.is_some_and(|root| root.navigation_allowed(*command, cx))
+                        }
                         Command::NewWindow => allowed,
                         Command::CloseWindow => window,
                         Command::CloseAllWindows => has_windows && all_allowed,

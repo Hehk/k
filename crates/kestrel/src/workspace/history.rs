@@ -1,12 +1,12 @@
-use kestrel::state::{AppState, Route, StateError, WindowId};
+use kestrel::state::{AppState, StateError, Tab, WindowId};
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Clone, Debug)]
 pub enum Closed {
-    Tab { index: usize, route: Route },
-    Window { tabs: Vec<Route>, active: usize },
+    Tab { index: usize, tab: Tab },
+    Window { tabs: Vec<Tab>, active: usize },
 }
 
 impl Closed {
@@ -24,7 +24,7 @@ impl Closed {
             }
             if after.window(window.id).is_err() && removed.len() == window.tabs.len() {
                 closed.push(Self::Window {
-                    tabs: window.tabs.iter().map(|tab| tab.route.clone()).collect(),
+                    tabs: window.tabs.clone(),
                     active: window
                         .tabs
                         .iter()
@@ -34,7 +34,7 @@ impl Closed {
             } else {
                 closed.extend(removed.into_iter().map(|(index, tab)| Self::Tab {
                     index,
-                    route: tab.route.clone(),
+                    tab: tab.clone(),
                 }));
             }
         }
@@ -47,19 +47,19 @@ impl Closed {
         target: Option<WindowId>,
     ) -> Result<WindowId, StateError> {
         match self {
-            Self::Tab { index, route } => {
+            Self::Tab { index, tab } => {
                 let target = match target {
                     Some(target) => target,
                     None => state.new_window()?,
                 };
-                state.insert_tab(target, *index, route.clone())?;
+                state.insert_tab(target, *index, tab.clone())?;
                 Ok(target)
             }
             Self::Window { tabs, active } => {
                 let target = state.new_window()?;
                 let mut selected = None;
-                for (index, route) in tabs.iter().enumerate() {
-                    let tab = state.insert_tab(target, index, route.clone())?;
+                for (index, tab) in tabs.iter().enumerate() {
+                    let tab = state.insert_tab(target, index, tab.clone())?;
                     if index == *active {
                         selected = Some(tab);
                     }
