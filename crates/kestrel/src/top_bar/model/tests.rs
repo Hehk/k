@@ -849,11 +849,50 @@ fn tab_shortcuts_are_ignored_while_dragging_or_detaching() {
             Msg::SelectNext,
             Msg::SelectPrevious,
             Msg::SelectIndex(2),
+            Msg::SelectLast,
+            Msg::MoveLeft,
+            Msg::MoveRight,
+            Msg::CloseOthers,
+            Msg::CloseRight,
         ] {
             assert!(h.send(message).is_empty());
         }
         assert_eq!(h.model, snapshot);
     }
+}
+
+#[test]
+fn keyboard_reordering_clamps_at_edges_and_last_selection_uses_current_order() {
+    let mut h = Harness::new(3);
+    h.send(Msg::SelectIndex(0));
+    assert!(h.send(Msg::MoveLeft).is_empty());
+    h.send(Msg::MoveRight);
+    assert_eq!(h.order(), [2, 1, 3]);
+    assert_eq!(h.model.active, Some(1));
+    h.send(Msg::MoveRight);
+    assert_eq!(h.order(), [2, 3, 1]);
+    assert!(h.send(Msg::MoveRight).is_empty());
+    h.send(Msg::SelectIndex(0));
+    assert_eq!(h.send(Msg::SelectLast)[0], Command::Reveal(1));
+    assert_eq!(h.model.active, Some(1));
+}
+
+#[test]
+fn bulk_tab_closure_preserves_the_active_tab_and_reveals_it() {
+    let mut h = Harness::new(4);
+    h.send(Msg::SelectIndex(1));
+    let commands = h.send(Msg::CloseRight);
+    assert_eq!(h.order(), [1, 2]);
+    assert_eq!(h.model.active, Some(2));
+    assert!(commands.contains(&Command::Reveal(2)));
+    let commands = h.send(Msg::CloseOthers);
+    assert_eq!(h.order(), [2]);
+    assert_eq!(h.model.active, Some(2));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::Window(_)))
+    );
 }
 
 #[test]
@@ -867,7 +906,7 @@ fn generated_message_sequences_preserve_invariants() {
         }
         let id = (seed >> 8) % 8 + 1;
         let token = h.model.drag_token().unwrap_or(h.model.next_drag());
-        let message = match seed % 11 {
+        let message = match seed % 16 {
             0 => Msg::Add,
             1 => Msg::Select(id),
             2 => Msg::DragStarted { tab: id, token },
@@ -897,6 +936,11 @@ fn generated_message_sequences_preserve_invariants() {
                 tab: id,
                 hovered: seed & 16 != 0,
             },
+            10 => Msg::SelectLast,
+            11 => Msg::MoveLeft,
+            12 => Msg::MoveRight,
+            13 => Msg::CloseOthers,
+            14 => Msg::CloseRight,
             _ => Msg::LayoutChanged(Geometry {
                 width: ((seed >> 16) % 1500) as f32,
                 scroll: -(((seed >> 32) % 400) as f32),

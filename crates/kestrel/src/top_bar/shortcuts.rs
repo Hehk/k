@@ -9,6 +9,11 @@ pub enum TabAction {
     Close,
     Next,
     Previous,
+    Last,
+    MoveLeft,
+    MoveRight,
+    CloseOthers,
+    CloseRight,
     Focus(usize),
 }
 
@@ -19,6 +24,11 @@ impl TabAction {
             Self::Close => Msg::CloseActive,
             Self::Next => Msg::SelectNext,
             Self::Previous => Msg::SelectPrevious,
+            Self::Last => Msg::SelectLast,
+            Self::MoveLeft => Msg::MoveLeft,
+            Self::MoveRight => Msg::MoveRight,
+            Self::CloseOthers => Msg::CloseOthers,
+            Self::CloseRight => Msg::CloseRight,
             Self::Focus(index) => Msg::SelectIndex(*index),
         }
     }
@@ -26,7 +36,7 @@ impl TabAction {
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-t", TabAction::New, Some("Workspace")),
+        KeyBinding::new("cmd-t", TabAction::New, None),
         KeyBinding::new("cmd-w", TabAction::Close, Some("Workspace")),
         KeyBinding::new("cmd-shift-]", TabAction::Next, Some("Workspace")),
         KeyBinding::new("cmd-shift-[", TabAction::Previous, Some("Workspace")),
@@ -36,7 +46,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", TabAction::Next, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", TabAction::Previous, Some("Workspace")),
     ]);
-    cx.bind_keys((1..=9).map(|number| {
+    cx.bind_keys([KeyBinding::new("cmd-9", TabAction::Last, Some("Workspace"))]);
+    cx.bind_keys((1..=8).map(|number| {
         KeyBinding::new(
             &format!("cmd-{number}"),
             TabAction::Focus(number - 1),

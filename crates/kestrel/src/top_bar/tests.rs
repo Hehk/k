@@ -408,7 +408,7 @@ fn tab_shortcuts_add_select_cycle_and_close(cx: &mut TestAppContext) {
     assert_eq!(bar.read_with(cx, |bar, _| bar.active_tab().unwrap().id), 3);
     cx.simulate_keystrokes("cmd-{");
     assert_eq!(bar.read_with(cx, |bar, _| bar.active_tab().unwrap().id), 2);
-    cx.simulate_keystrokes("cmd-9");
+    cx.simulate_keystrokes("cmd-8");
     assert_eq!(bar.read_with(cx, |bar, _| bar.active_tab().unwrap().id), 2);
     cx.simulate_keystrokes("cmd-w");
     assert_eq!(order(&bar, cx), vec![1, 3]);
@@ -436,10 +436,15 @@ fn workspace_shortcuts_bubble_from_focused_sibling_content(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn cmd_nine_selects_ninth_not_last_tab(cx: &mut TestAppContext) {
-    let (bar, cx) = setup(cx, 10);
-    cx.simulate_keystrokes("cmd-9");
-    assert_eq!(bar.read_with(cx, |bar, _| bar.active_tab().unwrap().id), 9);
+fn cmd_nine_selects_last_tab(cx: &mut TestAppContext) {
+    for count in [1, 3, 9, 10] {
+        let (bar, cx) = setup(cx, count);
+        cx.simulate_keystrokes("cmd-1 cmd-9");
+        assert_eq!(
+            bar.read_with(cx, |bar, _| bar.active_tab().unwrap().id),
+            count as u64
+        );
+    }
 }
 
 #[gpui::test]

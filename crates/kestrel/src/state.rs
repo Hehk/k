@@ -422,6 +422,31 @@ impl AppState {
         Ok(id)
     }
 
+    pub fn insert_tab(
+        &mut self,
+        window: WindowId,
+        index: usize,
+        route: Route,
+    ) -> Result<TabId, StateError> {
+        self.window(window)?;
+        if let Route::Repository { project, review } = &route {
+            self.project(*project)?;
+            review.check_loaded()?;
+        }
+        let id = TabId(self.allocate()?);
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|item| item.id == window)
+            .expect("destination window was validated");
+        window
+            .tabs
+            .insert(index.min(window.tabs.len()), Tab { id, route });
+        window.active_tab = Some(id);
+        self.active_window = Some(window.id);
+        Ok(id)
+    }
+
     pub fn select_tab(&mut self, tab: TabId) -> Result<(), StateError> {
         let window = self
             .windows

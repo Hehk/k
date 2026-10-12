@@ -111,6 +111,31 @@ impl TopBar {
         self.model.active_tab()
     }
 
+    pub fn interactive(&self) -> bool {
+        self.model.view().interactive
+    }
+
+    pub fn allows(&self, action: &TabAction) -> bool {
+        if !self.interactive() {
+            return false;
+        }
+        let view = self.model.view();
+        let index = self
+            .model
+            .active_tab()
+            .and_then(|tab| self.model.tab_index(tab.id));
+        match action {
+            TabAction::New => true,
+            TabAction::MoveLeft => index.is_some_and(|index| index > 0),
+            TabAction::MoveRight | TabAction::CloseRight => {
+                index.is_some_and(|index| index + 1 < view.tabs.len())
+            }
+            TabAction::CloseOthers => view.tabs.len() > 1,
+            TabAction::Focus(index) => *index < view.tabs.len(),
+            _ => index.is_some(),
+        }
+    }
+
     pub fn synchronize(
         &mut self,
         tabs: Vec<Tab>,
@@ -364,6 +389,7 @@ impl TopBar {
 
 impl Render for TopBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::commands::refresh_later(cx);
         let view = self.model.view();
         let geometry = self.model.geometry();
         let entity = cx.entity().downgrade();

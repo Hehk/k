@@ -12,6 +12,11 @@ use kestrel::{
 
 use crate::top_bar::model::Tab;
 
+mod history;
+use history::Closed;
+
+const CLOSED_HISTORY_LIMIT: usize = 100;
+
 pub struct Session(pub Entity<Workspace>);
 impl Global for Session {}
 
@@ -75,6 +80,7 @@ pub struct Workspace {
     save_error: Option<String>,
     notice: Option<String>,
     quitting: bool,
+    closed: Vec<Closed>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     _subscriptions: Vec<Subscription>,
 }
@@ -108,6 +114,7 @@ impl Workspace {
             save_error: None,
             notice: loaded.notice,
             quitting: false,
+            closed: Vec::new(),
             native_windows: HashMap::new(),
             _subscriptions: vec![quit, closed],
         }
@@ -143,6 +150,9 @@ impl Workspace {
         if self.quitting || self.state == state {
             return;
         }
+        self.closed.extend(Closed::removed(&self.state, &state));
+        let excess = self.closed.len().saturating_sub(CLOSED_HISTORY_LIMIT);
+        self.closed.drain(..excess);
         self.state = state;
         self.revision += 1;
         self.save(cx);
@@ -160,6 +170,30 @@ impl Workspace {
                 cx,
             );
         }
+    }
+
+    pub fn can_reopen(&self) -> bool {
+        !self.quitting && !self.closed.is_empty()
+    }
+
+    pub fn reopen_state(
+        &self,
+        target: Option<WindowId>,
+    ) -> Result<Option<(AppState, WindowId)>, StateError> {
+        if self.quitting {
+            return Err(StateError("application is quitting"));
+        }
+        let Some(closed) = self.closed.last() else {
+            return Ok(None);
+        };
+        let mut state = self.state.clone();
+        let id = closed.restore(&mut state, target)?;
+        Ok(Some((state, id)))
+    }
+
+    pub fn finish_reopen(&mut self, state: AppState, cx: &mut Context<Self>) {
+        self.closed.pop();
+        self.replace(state, cx);
     }
 
     pub fn register_window(&mut self, id: WindowId, handle: AnyWindowHandle) {

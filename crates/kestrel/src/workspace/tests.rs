@@ -216,3 +216,48 @@ fn failed_edits_leave_the_workspace_and_save_schedule_unchanged(cx: &mut TestApp
         assert!(workspace.save_task.is_none());
     });
 }
+
+#[gpui::test]
+fn closed_history_is_bounded_transactional_and_not_persisted(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let loaded = LoadedWorkspace::load(Ok(Store::new(path.clone())));
+    let workspace = cx.new(|cx| Workspace::new(loaded, cx));
+    workspace.update(cx, |workspace, cx| {
+        let window = workspace
+            .edit(
+                |state| {
+                    let window = state.new_window()?;
+                    state.new_tab(window)?;
+                    Ok(window)
+                },
+                cx,
+            )
+            .unwrap();
+        for _ in 0..CLOSED_HISTORY_LIMIT + 3 {
+            let tab = workspace.edit(|state| state.new_tab(window), cx).unwrap();
+            workspace
+                .edit(
+                    |state| {
+                        state.close_tab(tab);
+                        Ok(())
+                    },
+                    cx,
+                )
+                .unwrap();
+        }
+        assert_eq!(workspace.closed.len(), CLOSED_HISTORY_LIMIT);
+        let before = workspace.state().clone();
+        let revision = workspace.revision;
+        let (_, restored) = workspace.reopen_state(Some(window)).unwrap().unwrap();
+        assert_eq!(restored, window);
+        assert_eq!(workspace.state(), &before);
+        assert_eq!(workspace.revision, revision);
+        assert_eq!(workspace.closed.len(), CLOSED_HISTORY_LIMIT);
+        workspace.flush_on_quit();
+        assert!(!workspace.can_reopen());
+        assert!(workspace.reopen_state(None).is_err());
+    });
+    let restored = cx.new(|cx| Workspace::new(LoadedWorkspace::load(Ok(Store::new(path))), cx));
+    assert!(!restored.read_with(cx, |workspace, _| workspace.can_reopen()));
+}

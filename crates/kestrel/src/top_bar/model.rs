@@ -100,6 +100,11 @@ pub enum Msg {
     Add,
     Select(TabId),
     SelectIndex(usize),
+    SelectLast,
+    MoveLeft,
+    MoveRight,
+    CloseOthers,
+    CloseRight,
     SelectNext,
     SelectPrevious,
     Close(TabId),
@@ -453,6 +458,42 @@ impl Model {
             Msg::SelectIndex(index) if self.phase == Phase::Idle => {
                 if let Some(tab) = self.tabs.get(index) {
                     self.select_tab(tab.id, &mut commands);
+                }
+            }
+            Msg::SelectLast if self.phase == Phase::Idle => {
+                if let Some(tab) = self.tabs.last() {
+                    self.select_tab(tab.id, &mut commands);
+                }
+            }
+            Msg::MoveLeft | Msg::MoveRight if self.phase == Phase::Idle => {
+                if let Some(index) = self.active.and_then(|id| self.tab_index(id)) {
+                    let target = if message == Msg::MoveLeft {
+                        index.saturating_sub(1)
+                    } else {
+                        (index + 1).min(self.tabs.len() - 1)
+                    };
+                    if index != target {
+                        let from = self.samples();
+                        self.tabs.swap(index, target);
+                        commands.push(Command::Reveal(self.tabs[target].id));
+                        self.animate(from, &mut commands);
+                    }
+                }
+            }
+            Msg::CloseOthers | Msg::CloseRight if self.phase == Phase::Idle => {
+                if let Some(index) = self.active.and_then(|id| self.tab_index(id)) {
+                    let from = self.samples();
+                    if message == Msg::CloseOthers {
+                        let tab = self.tabs[index].clone();
+                        self.tabs = vec![tab];
+                    } else {
+                        self.tabs.truncate(index + 1);
+                    }
+                    self.hovered = None;
+                    commands.push(Command::Reveal(
+                        self.tabs.last().expect("active tab remains").id,
+                    ));
+                    self.animate(from, &mut commands);
                 }
             }
             Msg::SelectNext | Msg::SelectPrevious if self.phase == Phase::Idle => {

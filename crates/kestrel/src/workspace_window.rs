@@ -10,6 +10,7 @@ use kestrel::{
 };
 
 use crate::{
+    commands::{self, Command},
     top_bar::{
         TabAction, TopBar,
         model::{Msg, WindowCommand},
@@ -78,7 +79,9 @@ impl Kestrel {
                 this.load_project(cx);
                 cx.notify();
             }),
+            cx.observe_window_bounds(window, |_, _, cx| commands::refresh_later(cx)),
             cx.observe_window_activation(window, |this, window, cx| {
+                commands::refresh_later(cx);
                 if window.is_window_active() {
                     let _ = this.workspace.update(cx, |workspace, cx| {
                         workspace.edit(|state| state.focus_window(this.id), cx)
@@ -135,6 +138,69 @@ impl Kestrel {
         Ok(handle)
     }
 
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
+
+    pub fn tab_count(&self, cx: &App) -> usize {
+        self.workspace
+            .read(cx)
+            .state()
+            .window(self.id)
+            .map_or(0, |window| window.tabs.len())
+    }
+
+    pub fn commands_allowed(&self, cx: &App) -> bool {
+        self.opening.is_none() && self.top_bar.read(cx).interactive()
+    }
+
+    pub fn tab_action_allowed(&self, action: &TabAction, cx: &App) -> bool {
+        self.commands_allowed(cx) && self.top_bar.read(cx).allows(action)
+    }
+
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.close_window(self.id, cx));
+        window.remove_window();
+    }
+
+    pub fn command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.commands_allowed(cx) {
+            return;
+        }
+        match command {
+            Command::CloseWindow => self.close(window, cx),
+            Command::Minimize if !window.is_fullscreen() => window.minimize_window(),
+            Command::Zoom if !window.is_fullscreen() => window.zoom_window(),
+            Command::FullScreen => window.toggle_fullscreen(),
+            Command::DetachTab if self.tab_count(cx) > 1 => {
+                if let Some(tab) = self.top_bar.read(cx).active_tab().map(|tab| tab.id) {
+                    self.error = self.detach(tab, cx).err().map(|error| error.to_string());
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn reopen(
+        workspace: Entity<Workspace>,
+        target: Option<WindowId>,
+        cx: &mut App,
+    ) -> gpui::Result<()> {
+        let Some((state, id)) = workspace.read(cx).reopen_state(target)? else {
+            return Ok(());
+        };
+        if workspace.read(cx).state().window(id).is_err() {
+            Self::open(workspace.clone(), id, cx)?;
+        }
+        workspace.update(cx, |workspace, cx| {
+            workspace.finish_reopen(state, cx);
+            workspace.activate_window(id, cx);
+        });
+        Ok(())
+    }
+
     fn handle_window_command(
         &mut self,
         bar: &Entity<TopBar>,
@@ -179,11 +245,7 @@ impl Kestrel {
                 });
                 cx.notify();
             }
-            WindowCommand::Close => {
-                self.workspace
-                    .update(cx, |workspace, cx| workspace.close_window(self.id, cx));
-                window.remove_window();
-            }
+            WindowCommand::Close => self.close(window, cx),
         }
     }
 
@@ -389,7 +451,8 @@ fn button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
 }
 
 impl Render for Kestrel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        commands::refresh_later(cx);
         let workspace = self.workspace.read(cx);
         let tab = workspace
             .state()
@@ -404,6 +467,11 @@ impl Render for Kestrel {
             .map(|tab| tab_title(workspace.state(), tab))
             .unwrap_or_else(|| "Home".into());
         let directory = project.map(|project| project.directory.display().to_string());
+        let native_title = match &directory {
+            Some(directory) => format!("{title} — {directory} — Kestrel"),
+            None => format!("{title} — Kestrel"),
+        };
+        window.set_window_title(&native_title);
         let recent = workspace
             .state()
             .projects()
@@ -416,6 +484,9 @@ impl Render for Kestrel {
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, action: &TabAction, window, cx| {
+                if !this.tab_action_allowed(action, cx) {
+                    return;
+                }
                 this.top_bar
                     .update(cx, |bar, cx| bar.dispatch(action.message(), window, cx));
             }))

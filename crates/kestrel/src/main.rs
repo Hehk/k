@@ -1,19 +1,18 @@
+mod commands;
 #[cfg(any(debug_assertions, feature = "frame-metrics"))]
 mod debug_panel;
+mod native;
 mod top_bar;
 mod workspace;
 mod workspace_window;
 
-use gpui::{
-    App, AppContext, Application, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, point, px,
-};
+use gpui::{App, AppContext, Application, TitlebarOptions, WindowBounds, WindowOptions, point, px};
 use kestrel::storage::Store;
 use top_bar::TITLEBAR_HEIGHT;
 use workspace::{LoadedWorkspace, Session, Workspace};
 use workspace_window::Kestrel;
 
-actions!(kestrel, [Quit, NewWindow]);
+use commands::new_window;
 
 const TRAFFIC_LIGHT_HEIGHT: f32 = 14.;
 
@@ -64,13 +63,6 @@ fn window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
     }
 }
 
-fn new_window(cx: &mut App) {
-    let workspace = cx.global::<Session>().0.clone();
-    if let Err(error) = Kestrel::new_window(workspace, cx) {
-        eprintln!("Could not open window: {error}");
-    }
-}
-
 fn main() {
     #[cfg(any(debug_assertions, feature = "frame-metrics"))]
     debug_panel::install();
@@ -79,22 +71,14 @@ fn main() {
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
             new_window(cx);
+        } else {
+            native::restore_minimized_window();
         }
     });
     app.run(move |cx: &mut App| {
-        top_bar::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-n", NewWindow, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &NewWindow, cx| new_window(cx));
-        cx.set_menus(vec![Menu {
-            name: "Kestrel".into(),
-            items: vec![MenuItem::action("Quit Kestrel", Quit)],
-        }]);
         let workspace = cx.new(|cx| Workspace::new(loaded, cx));
         cx.set_global(Session(workspace.clone()));
+        commands::install(cx);
         let windows = workspace
             .read(cx)
             .state()
