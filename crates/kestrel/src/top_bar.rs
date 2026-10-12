@@ -53,8 +53,8 @@ impl Render for DragPreview {
 }
 
 pub struct TopBar {
-    // TODO: Derive tabs and selection from shared active-content state when it exists.
     model: Model,
+    managed: bool,
     scroll: ScrollHandle,
     focus: FocusHandle,
     previous_focus: Option<WeakFocusHandle>,
@@ -63,14 +63,35 @@ pub struct TopBar {
 impl EventEmitter<WindowCommand> for TopBar {}
 
 impl TopBar {
+    pub fn for_workspace(
+        tabs: Vec<Tab>,
+        active: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let model = Model::with_tabs(cx.entity_id().as_u64(), tabs, active);
+        Self::with_model(model, true, window, cx)
+    }
+
+    #[cfg(test)]
     pub fn new(initial: Option<(Tab, u64)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let source = cx.entity_id().as_u64();
         let model = match initial {
             Some((tab, next_id)) => Model::with_tab(source, tab, next_id),
             None => Model::new(source),
         };
+        Self::with_model(model, false, window, cx)
+    }
+
+    fn with_model(
+        model: Model,
+        managed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut bar = Self {
             model,
+            managed,
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             previous_focus: None,
@@ -90,8 +111,37 @@ impl TopBar {
         self.model.active_tab()
     }
 
+    pub fn synchronize(
+        &mut self,
+        tabs: Vec<Tab>,
+        active: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let commands = self.model.synchronize(tabs, active);
+        if !commands.is_empty() {
+            self.run(commands, window, cx);
+        }
+    }
+
     pub fn dispatch(&mut self, message: Msg, window: &mut Window, cx: &mut Context<Self>) {
-        for command in self.model.update(message) {
+        if self.managed && message == Msg::Add {
+            if self.model.view().interactive {
+                cx.emit(WindowCommand::NewTab);
+            }
+            return;
+        }
+        let before = self.model.selection();
+        let commands = self.model.update(message);
+        let (tabs, active) = self.model.selection();
+        if self.managed && before != (tabs.clone(), active) {
+            cx.emit(WindowCommand::LayoutChanged { tabs, active });
+        }
+        self.run(commands, window, cx);
+    }
+
+    fn run(&mut self, commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) {
+        for command in commands {
             match command {
                 Command::Reveal(id) => {
                     if let Some(index) = self.model.tab_index(id) {

@@ -297,8 +297,8 @@ fn panel_bounds_stay_fixed_when_values_change(cx: &mut TestAppContext) {
 #[gpui::test]
 fn real_gpui_draws_produce_cost_samples_without_creating_redraws(cx: &mut TestAppContext) {
     let _subscriber = tracing::subscriber::set_default(timing::subscriber());
-    let (app, cx) = cx.add_window_view(|window, cx| crate::Kestrel::new(None, window, cx));
-    let counter = app.read_with(cx, |app, _| app.debug_panel.clone());
+    let (host, cx) = cx.add_window_view(Host::new);
+    let counter = host.read_with(cx, |host, _| host.counter.clone());
     let samples = counter.read_with(cx, |counter, _| counter.samples.clone());
     redraw(cx);
     assert!(!samples.borrow().frames.is_empty());

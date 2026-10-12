@@ -1,0 +1,538 @@
+use std::path::PathBuf;
+
+use gpui::{
+    App, Context, Entity, FocusHandle, PathPromptOptions, Subscription, Task, Window, WindowBounds,
+    WindowHandle, div, prelude::*, px, rgb, size,
+};
+use kestrel::{
+    git::{Repository, RepositoryInfo},
+    state::{ProjectId, Route, StateError, TabId, WindowId},
+};
+
+use crate::{
+    top_bar::{
+        TabAction, TopBar,
+        model::{Msg, WindowCommand},
+    },
+    workspace::{Workspace, project_title, set_tab_layout, tab_title},
+};
+
+enum RepositoryStatus {
+    Loading,
+    Ready,
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpenTarget {
+    tab: TabId,
+    route: Route,
+}
+
+pub struct Kestrel {
+    #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+    pub(crate) debug_panel: Entity<crate::debug_panel::DebugPanel>,
+    pub(crate) top_bar: Entity<TopBar>,
+    workspace: Entity<Workspace>,
+    id: WindowId,
+    focus: FocusHandle,
+    selection: Option<(TabId, ProjectId)>,
+    repository: RepositoryStatus,
+    repository_task: Option<Task<()>>,
+    request: u64,
+    open_task: Option<Task<()>>,
+    opening: Option<OpenTarget>,
+    error: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Kestrel {
+    fn new(
+        workspace: Entity<Workspace>,
+        id: WindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (tabs, active) = workspace.read(cx).tabs(id);
+        let top_bar = cx.new(|cx| TopBar::for_workspace(tabs, active, window, cx));
+        let focus = cx.focus_handle();
+        window.focus(&focus);
+        let subscriptions = vec![
+            cx.subscribe_in(&top_bar, window, Self::handle_window_command),
+            cx.observe_in(&workspace, window, |this, _, window, cx| {
+                if this.workspace.read(cx).state().window(this.id).is_err() {
+                    window.remove_window();
+                    return;
+                }
+                let (tabs, active) = this.workspace.read(cx).tabs(this.id);
+                this.top_bar
+                    .update(cx, |bar, cx| bar.synchronize(tabs, active, window, cx));
+                if this
+                    .opening
+                    .as_ref()
+                    .is_some_and(|target| !this.accepts_open(target, cx))
+                {
+                    this.open_task.take();
+                    this.opening = None;
+                }
+                this.load_project(cx);
+                cx.notify();
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    let _ = this.workspace.update(cx, |workspace, cx| {
+                        workspace.edit(|state| state.focus_window(this.id), cx)
+                    });
+                }
+            }),
+        ];
+        let mut this = Self {
+            #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+            debug_panel: cx.new(|_| crate::debug_panel::DebugPanel::default()),
+            top_bar,
+            workspace,
+            id,
+            focus,
+            selection: None,
+            repository: RepositoryStatus::Loading,
+            repository_task: None,
+            request: 0,
+            open_task: None,
+            opening: None,
+            error: None,
+            _subscriptions: subscriptions,
+        };
+        this.load_project(cx);
+        this
+    }
+
+    pub fn open(
+        workspace: Entity<Workspace>,
+        id: WindowId,
+        cx: &mut App,
+    ) -> gpui::Result<WindowHandle<Self>> {
+        let bounds =
+            WindowBounds::Windowed(gpui::Bounds::centered(None, size(px(1100.), px(760.)), cx));
+        let shared = workspace.clone();
+        let handle = cx.open_window(crate::window_options(Some(bounds)), |window, cx| {
+            cx.new(|cx| Self::new(shared, id, window, cx))
+        })?;
+        workspace.update(cx, |workspace, _| {
+            workspace.register_window(id, handle.into());
+        });
+        Ok(handle)
+    }
+
+    pub fn new_window(
+        workspace: Entity<Workspace>,
+        cx: &mut App,
+    ) -> gpui::Result<WindowHandle<Self>> {
+        let mut state = workspace.read(cx).state().clone();
+        let id = state.new_window()?;
+        state.new_tab(id)?;
+        let handle = Self::open(workspace.clone(), id, cx)?;
+        workspace.update(cx, |workspace, cx| workspace.replace(state, cx));
+        Ok(handle)
+    }
+
+    fn handle_window_command(
+        &mut self,
+        bar: &Entity<TopBar>,
+        command: &WindowCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            WindowCommand::NewTab => {
+                let result = self.workspace.update(cx, |workspace, cx| {
+                    workspace.edit(|state| state.new_tab(self.id), cx)
+                });
+                self.error = result.err().map(|error| error.to_string());
+                cx.notify();
+            }
+            WindowCommand::LayoutChanged { tabs, active } => {
+                if self.workspace.read(cx).state().window(self.id).is_ok() {
+                    let result = self.workspace.update(cx, |workspace, cx| {
+                        workspace.edit(|state| set_tab_layout(state, self.id, tabs, *active), cx)
+                    });
+                    if let Err(error) = result {
+                        self.error = Some(error.to_string());
+                        let (tabs, active) = self.workspace.read(cx).tabs(self.id);
+                        bar.update(cx, |bar, cx| bar.synchronize(tabs, active, window, cx));
+                        cx.notify();
+                    }
+                }
+            }
+            WindowCommand::OpenDetached { request, tab, .. } => {
+                let result = self.detach(tab.id, cx);
+                let success = result.is_ok();
+                self.error = result.err().map(|error| error.to_string());
+                bar.update(cx, |bar, cx| {
+                    bar.dispatch(
+                        Msg::DetachCompleted {
+                            request: *request,
+                            success,
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                cx.notify();
+            }
+            WindowCommand::Close => {
+                self.workspace
+                    .update(cx, |workspace, cx| workspace.close_window(self.id, cx));
+                window.remove_window();
+            }
+        }
+    }
+
+    fn detach(&mut self, tab: u64, cx: &mut Context<Self>) -> gpui::Result<()> {
+        let mut state = self.workspace.read(cx).state().clone();
+        let tab = state
+            .window(self.id)?
+            .tabs
+            .iter()
+            .find(|item| item.id.as_u64() == tab)
+            .map(|tab| tab.id)
+            .ok_or(StateError("tab is not in this window"))?;
+        let target = state.new_window()?;
+        state.move_tab(tab, target, 0)?;
+        Self::open(self.workspace.clone(), target, cx)?;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.replace(state, cx));
+        Ok(())
+    }
+
+    fn open_saved(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let Some(target) = self.open_target(cx) else {
+            return;
+        };
+        let result = self.workspace.update(cx, |workspace, cx| {
+            workspace.edit(|state| state.open_project(project, target.tab), cx)
+        });
+        self.error = result.err().map(|error| error.to_string());
+        cx.notify();
+    }
+
+    fn prompt_repository(&mut self, cx: &mut Context<Self>) {
+        if self.opening.is_some() {
+            return;
+        }
+        let Some(target) = self.open_target(cx) else {
+            return;
+        };
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open repository".into()),
+        });
+        self.opening = Some(target.clone());
+        self.error = None;
+        self.open_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let paths = selected
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                    return Ok(None);
+                };
+                cx.background_executor()
+                    .spawn(async move { discover(path) })
+                    .await
+                    .map(Some)
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_open(target, result, cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    fn open_target(&self, cx: &App) -> Option<OpenTarget> {
+        let state = self.workspace.read(cx).state();
+        let tab = state.tab(state.window(self.id).ok()?.active_tab?).ok()?;
+        Some(OpenTarget {
+            tab: tab.id,
+            route: tab.route.clone(),
+        })
+    }
+
+    fn accepts_open(&self, target: &OpenTarget, cx: &App) -> bool {
+        self.workspace
+            .read(cx)
+            .state()
+            .window(self.id)
+            .is_ok_and(|window| {
+                window
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == target.tab && tab.route == target.route)
+            })
+    }
+
+    fn finish_open(
+        &mut self,
+        target: OpenTarget,
+        result: Result<Option<RepositoryInfo>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.opening.as_ref() != Some(&target) {
+            return;
+        }
+        self.opening = None;
+        if self.accepts_open(&target, cx) {
+            match result {
+                Ok(Some(info)) => self.open_repository(target, info, cx),
+                Ok(None) => {}
+                Err(error) => self.error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_repository(
+        &mut self,
+        target: OpenTarget,
+        info: RepositoryInfo,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accepts_open(&target, cx) {
+            return;
+        }
+        let result = self.workspace.update(cx, |workspace, cx| {
+            workspace.edit(
+                |state| {
+                    let project = state.register_project(&info)?;
+                    state.open_project(project, target.tab)
+                },
+                cx,
+            )
+        });
+        self.error = result.err().map(|error| error.to_string());
+    }
+
+    fn load_project(&mut self, cx: &mut Context<Self>) {
+        let active = self
+            .workspace
+            .read(cx)
+            .state()
+            .window(self.id)
+            .ok()
+            .and_then(|window| window.active_tab)
+            .and_then(|tab| {
+                self.workspace
+                    .read(cx)
+                    .state()
+                    .tab(tab)
+                    .ok()
+                    .and_then(|tab| tab.route.project().map(|project| (tab.id, project)))
+            });
+        if self.selection == active {
+            return;
+        }
+        self.selection = active;
+        self.request += 1;
+        self.repository_task.take();
+        self.repository = RepositoryStatus::Loading;
+        let Some((_, project)) = active else { return };
+        let project = self
+            .workspace
+            .read(cx)
+            .state()
+            .project(project)
+            .expect("repository routes reference registered projects")
+            .clone();
+        let request = self.request;
+        self.repository_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let info = discover(project.directory)?;
+                    if info.common_dir != project.common_dir {
+                        return Err("This path now belongs to a different repository.".into());
+                    }
+                    Ok(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request == request {
+                    this.repository = match result {
+                        Ok(()) => RepositoryStatus::Ready,
+                        Err(error) => RepositoryStatus::Unavailable(error),
+                    };
+                    cx.notify();
+                }
+            });
+        }));
+    }
+}
+
+fn discover(path: PathBuf) -> Result<RepositoryInfo, String> {
+    Repository::open(path)
+        .and_then(|repository| repository.info())
+        .map_err(|error| error.to_string())
+}
+
+fn button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(0xe7e9ee))
+        .cursor_pointer()
+        .child(label)
+}
+
+impl Render for Kestrel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace.read(cx);
+        let tab = workspace
+            .state()
+            .window(self.id)
+            .ok()
+            .and_then(|window| window.active_tab)
+            .and_then(|id| workspace.state().tab(id).ok());
+        let project = tab
+            .and_then(|tab| tab.route.project())
+            .and_then(|id| workspace.state().project(id).ok());
+        let title = tab
+            .map(|tab| tab_title(workspace.state(), tab))
+            .unwrap_or_else(|| "Home".into());
+        let directory = project.map(|project| project.directory.display().to_string());
+        let recent = workspace
+            .state()
+            .projects()
+            .iter()
+            .map(|project| (project.id, project_title(project)))
+            .collect::<Vec<_>>();
+        let notice = workspace.notice().map(str::to_owned);
+        let save_error = workspace.save_error().map(str::to_owned);
+        let root = div()
+            .key_context("Workspace")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, action: &TabAction, window, cx| {
+                this.top_bar
+                    .update(cx, |bar, cx| bar.dispatch(action.message(), window, cx));
+            }))
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0xf1f2f4))
+            .child(self.top_bar.clone())
+            .when_some(notice, |this, notice| {
+                this.child(div().p_2().text_sm().bg(rgb(0xffefc7)).child(notice))
+            })
+            .when_some(save_error, |this, error| {
+                this.child(
+                    div()
+                        .p_2()
+                        .flex()
+                        .gap_3()
+                        .text_sm()
+                        .bg(rgb(0xffefc7))
+                        .child(format!("Workspace is not saved: {error}"))
+                        .child(button("retry-save", "Retry").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.workspace
+                                    .update(cx, |workspace, cx| workspace.save(cx));
+                            },
+                        ))),
+                )
+            })
+            .child(
+                div()
+                    .id("content-frame")
+                    .flex_1()
+                    .mx_2()
+                    .mb_2()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0xe0e1e4))
+                    .bg(rgb(0xffffff))
+                    .child(div().text_lg().child(title))
+                    .when_some(directory.clone(), |this, directory| {
+                        this.child(div().text_sm().text_color(rgb(0x777980)).child(directory))
+                    })
+                    .when(directory.is_some(), |this| match &self.repository {
+                        RepositoryStatus::Loading => this.child("Opening repository…"),
+                        RepositoryStatus::Ready => this.child("Repository ready."),
+                        RepositoryStatus::Unavailable(error) => this
+                            .child(
+                                div()
+                                    .text_color(rgb(0xaa3030))
+                                    .child(format!("Repository unavailable: {error}")),
+                            )
+                            .child(button("retry-repository", "Retry").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.selection = None;
+                                    this.load_project(cx);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("close-tab", "Close tab").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.top_bar.update(cx, |bar, cx| {
+                                        bar.dispatch(Msg::CloseActive, window, cx)
+                                    });
+                                },
+                            ))),
+                    })
+                    .when_some(self.error.clone(), |this, error| {
+                        this.child(div().text_color(rgb(0xaa3030)).child(error))
+                    })
+                    .child(
+                        button(
+                            "open-repository",
+                            if self.opening.is_some() {
+                                "Opening…"
+                            } else {
+                                "Open repository…"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.prompt_repository(cx))),
+                    )
+                    .when(directory.is_some(), |this| {
+                        this.child(button("go-home", "Home").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(target) = this.open_target(cx) {
+                                    let result = this.workspace.update(cx, |workspace, cx| {
+                                        workspace.edit(|state| state.go_home(target.tab), cx)
+                                    });
+                                    this.error = result.err().map(|error| error.to_string());
+                                    cx.notify();
+                                }
+                            },
+                        )))
+                    })
+                    .when(directory.is_none(), |this| {
+                        this.children(recent.into_iter().map(|(id, title)| {
+                            div()
+                                .id(("recent-project", id.as_u64()))
+                                .cursor_pointer()
+                                .child(title)
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.open_saved(id, cx)),
+                                )
+                        }))
+                    }),
+            );
+        #[cfg(any(debug_assertions, feature = "frame-metrics"))]
+        let root = root.child(self.debug_panel.clone());
+        root
+    }
+}
+
+#[cfg(test)]
+mod tests;

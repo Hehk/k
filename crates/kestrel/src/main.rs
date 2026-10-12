@@ -1,148 +1,21 @@
 #[cfg(any(debug_assertions, feature = "frame-metrics"))]
 mod debug_panel;
 mod top_bar;
+mod workspace;
+mod workspace_window;
 
 use gpui::{
-    App, Application, Context, Entity, FocusHandle, KeyBinding, Menu, MenuItem, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px, rgb,
-    size,
+    App, AppContext, Application, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, point, px,
 };
-use top_bar::{
-    TITLEBAR_HEIGHT, TabAction, TopBar,
-    model::{Msg, Tab, WindowCommand},
-};
+use kestrel::storage::Store;
+use top_bar::TITLEBAR_HEIGHT;
+use workspace::{LoadedWorkspace, Session, Workspace};
+use workspace_window::Kestrel;
 
-actions!(kestrel, [Quit]);
+actions!(kestrel, [Quit, NewWindow]);
 
 const TRAFFIC_LIGHT_HEIGHT: f32 = 14.;
-
-struct Kestrel {
-    #[cfg(any(debug_assertions, feature = "frame-metrics"))]
-    debug_panel: Entity<debug_panel::DebugPanel>,
-    top_bar: Entity<TopBar>,
-    focus: FocusHandle,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl Kestrel {
-    fn new(initial: Option<(Tab, u64)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let top_bar = cx.new(|cx| TopBar::new(initial, window, cx));
-        let focus = cx.focus_handle();
-        window.focus(&focus);
-        let subscriptions = vec![
-            // TODO: Observe shared active-content changes instead of every tab-bar notification.
-            cx.observe(&top_bar, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&top_bar, window, Self::handle_window_command),
-        ];
-        Self {
-            #[cfg(any(debug_assertions, feature = "frame-metrics"))]
-            debug_panel: cx.new(|_| debug_panel::DebugPanel::default()),
-            top_bar,
-            focus,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    fn open(initial: Option<(Tab, u64)>, cx: &mut App) -> gpui::Result<gpui::WindowHandle<Self>> {
-        let bounds =
-            WindowBounds::Windowed(gpui::Bounds::centered(None, size(px(1100.), px(760.)), cx));
-        cx.open_window(window_options(Some(bounds)), |window, cx| {
-            cx.new(|cx| Self::new(initial, window, cx))
-        })
-    }
-
-    fn handle_window_command(
-        &mut self,
-        top_bar: &Entity<TopBar>,
-        command: &WindowCommand,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match command {
-            WindowCommand::OpenDetached {
-                request,
-                tab,
-                next_tab_id,
-            } => {
-                let success = Self::open(Some((tab.clone(), *next_tab_id)), cx).is_ok();
-                top_bar.update(cx, |bar, cx| {
-                    bar.dispatch(
-                        Msg::DetachCompleted {
-                            request: *request,
-                            success,
-                        },
-                        window,
-                        cx,
-                    );
-                });
-            }
-            WindowCommand::Close => window.remove_window(),
-        }
-    }
-
-    fn handle_tab_action(
-        &mut self,
-        action: &TabAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.top_bar
-            .update(cx, |bar, cx| bar.dispatch(action.message(), window, cx));
-    }
-}
-
-impl Render for Kestrel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self
-            .top_bar
-            .read(cx)
-            .active_tab()
-            .map(|tab| tab.title.clone())
-            .unwrap_or_default();
-
-        let root = div()
-            .key_context("Workspace")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::handle_tab_action))
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(0xf1f2f4))
-            .child(self.top_bar.clone())
-            .child(
-                div().flex_1().pb_2().px_2().child(
-                    div()
-                        .id("content-frame")
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .items_center()
-                        .gap_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(0xe0e1e4))
-                        .bg(rgb(0xffffff))
-                        .child(
-                            div()
-                                .text_lg()
-                                .debug_selector(|| format!("content-title-{title}"))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x777980))
-                                .child("Project or review workspace"),
-                        ),
-                ),
-            );
-        #[cfg(any(debug_assertions, feature = "frame-metrics"))]
-        let root = root.child(self.debug_panel.clone());
-        root
-    }
-}
 
 #[cfg(target_os = "macos")]
 fn start_window_drag() {
@@ -191,18 +64,57 @@ fn window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
     }
 }
 
+fn new_window(cx: &mut App) {
+    let workspace = cx.global::<Session>().0.clone();
+    if let Err(error) = Kestrel::new_window(workspace, cx) {
+        eprintln!("Could not open window: {error}");
+    }
+}
+
 fn main() {
     #[cfg(any(debug_assertions, feature = "frame-metrics"))]
     debug_panel::install();
-    Application::new().run(|cx: &mut App| {
+    let loaded = LoadedWorkspace::load(Store::for_app());
+    let app = Application::new();
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            new_window(cx);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        top_bar::bind_keys(cx);
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-n", NewWindow, None),
+        ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.on_action(|_: &NewWindow, cx| new_window(cx));
         cx.set_menus(vec![Menu {
             name: "Kestrel".into(),
             items: vec![MenuItem::action("Quit Kestrel", Quit)],
         }]);
-        top_bar::bind_keys(cx);
-        Kestrel::open(None, cx).unwrap();
+        let workspace = cx.new(|cx| Workspace::new(loaded, cx));
+        cx.set_global(Session(workspace.clone()));
+        let windows = workspace
+            .read(cx)
+            .state()
+            .windows()
+            .iter()
+            .map(|window| window.id)
+            .collect::<Vec<_>>();
+        let active = workspace.read(cx).state().active_window();
+        if windows.is_empty() {
+            new_window(cx);
+        } else {
+            for id in windows {
+                if let Err(error) = Kestrel::open(workspace.clone(), id, cx) {
+                    eprintln!("Could not restore window: {error}");
+                }
+            }
+            if let Some(active) = active {
+                workspace.update(cx, |workspace, cx| workspace.activate_window(active, cx));
+            }
+        }
         cx.activate(true);
     });
 }

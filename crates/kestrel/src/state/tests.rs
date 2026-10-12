@@ -1,12 +1,12 @@
 use super::*;
 use crate::review::{Endpoints, ObjectId};
 
-fn info(name: &str, current_branch: &str) -> RepositoryInfo {
+fn info(name: &str, branch: &str) -> RepositoryInfo {
     let directory = std::env::temp_dir().join(name);
     RepositoryInfo {
         common_dir: directory.join(".git"),
         directory,
-        current_branch: Some(RefName::from(current_branch)),
+        current_branch: Some(RefName::from(branch)),
     }
 }
 
@@ -20,6 +20,16 @@ fn comparison(branch: &str) -> Comparison {
     }
 }
 
+fn context(state: &AppState, tab: TabId) -> &ReviewContext {
+    state.tab(tab).unwrap().route.review().unwrap()
+}
+
+fn open(state: &mut AppState, project: ProjectId, window: WindowId) -> TabId {
+    let tab = state.new_tab(window).unwrap();
+    state.open_project(project, tab).unwrap();
+    tab
+}
+
 fn assert_round_trip(state: &AppState) {
     let json = serde_json::to_vec(state).unwrap();
     let restored: AppState = serde_json::from_slice(&json).unwrap();
@@ -27,13 +37,37 @@ fn assert_round_trip(state: &AppState) {
 }
 
 #[test]
+fn new_tabs_are_home_routes_with_no_repository_side_effects() {
+    let mut state = AppState::default();
+    let window = state.new_window().unwrap();
+    let a = state.new_tab(window).unwrap();
+    let b = state.new_tab(window).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(state.tab(a).unwrap().route, Route::Home);
+    assert_eq!(state.tab(b).unwrap().route, Route::Home);
+    assert_eq!(state.window(window).unwrap().active_tab, Some(b));
+    assert!(state.projects().is_empty());
+    assert_round_trip(&state);
+}
+
+#[test]
+fn focusing_a_window_changes_only_focus_and_rejects_closed_windows() {
+    let mut state = AppState::default();
+    let first = state.new_window().unwrap();
+    let second = state.new_window().unwrap();
+    state.focus_window(first).unwrap();
+    assert_eq!(state.active_window(), Some(first));
+    state.close_window(second);
+    let before = state.clone();
+    assert!(state.focus_window(second).is_err());
+    assert_eq!(state, before);
+    assert_round_trip(&state);
+}
+
+#[test]
 fn saved_state_keeps_the_existing_flat_json_shape() {
-    let saved = serde_json::json!({
-        "projects": [],
-        "windows": [],
-        "active_window": null,
-        "next_id": 1,
-    });
+    let saved =
+        serde_json::json!({ "projects": [], "windows": [], "active_window": null, "next_id": 1 });
     let state: AppState = serde_json::from_value(saved.clone()).unwrap();
     assert_eq!(state, AppState::default());
     assert_eq!(serde_json::to_value(&state).unwrap(), saved);
@@ -42,137 +76,186 @@ fn saved_state_keeps_the_existing_flat_json_shape() {
 #[test]
 fn branches_keep_their_comparison_base_and_reading_position() {
     let mut state = AppState::default();
-    let id = state
+    let project = state
         .register_project(&info("one", "refs/heads/a"))
         .unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
     state
         .set_comparison(
-            id,
+            tab,
             BaseSelection::Explicit(RefName::from("refs/heads/main")),
             comparison("refs/heads/a"),
         )
         .unwrap();
     state
         .set_browsing(
-            id,
+            tab,
             &RefName::from("refs/heads/a"),
             Browsing {
-                file: Some(GitPath::from("src/file.rs")),
-                directory: Some(GitPath::from("src")),
+                file: Some("src/file.rs".into()),
+                directory: Some("src".into()),
                 mode: ReadingMode::HeadFile,
                 first_visible_line: 82,
             },
         )
         .unwrap();
-    let expected = state.project(id).unwrap().active_review().unwrap().clone();
+    let expected = context(&state, tab).active_review().unwrap().clone();
     state
-        .select_branch(id, RefName::from("refs/heads/b"))
+        .select_branch(tab, RefName::from("refs/heads/b"))
         .unwrap();
-    let b = state.project(id).unwrap().active_review().unwrap();
-    assert!(b.comparison.is_none());
-    assert_eq!(b.base, BaseSelection::Default);
+    assert!(
+        context(&state, tab)
+            .active_review()
+            .unwrap()
+            .comparison
+            .is_none()
+    );
     state
-        .set_comparison(id, BaseSelection::Default, comparison("refs/heads/b"))
+        .set_comparison(tab, BaseSelection::Default, comparison("refs/heads/b"))
         .unwrap();
     state
-        .select_branch(id, RefName::from("refs/heads/a"))
+        .select_branch(tab, RefName::from("refs/heads/a"))
         .unwrap();
-    assert_eq!(state.project(id).unwrap().active_review(), Some(&expected));
+    assert_eq!(context(&state, tab).active_review(), Some(&expected));
     assert_round_trip(&state);
 }
 
 #[test]
-fn worktrees_share_one_project_and_do_not_replace_saved_selection() {
+fn duplicate_repository_routes_have_independent_branches_comparisons_and_browsing() {
+    let mut state = AppState::default();
+    let project = state
+        .register_project(&info("repo", "refs/heads/a"))
+        .unwrap();
+    let window = state.new_window().unwrap();
+    let a = open(&mut state, project, window);
+    let b = open(&mut state, project, window);
+    let other = state.new_window().unwrap();
+    let c = open(&mut state, project, other);
+    let before_b = state.tab(b).unwrap().clone();
+    let before_c = state.tab(c).unwrap().clone();
+    state
+        .set_comparison(a, BaseSelection::Default, comparison("refs/heads/a"))
+        .unwrap();
+    state
+        .set_browsing(
+            a,
+            &RefName::from("refs/heads/a"),
+            Browsing {
+                file: Some("a.rs".into()),
+                first_visible_line: 42,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    state
+        .select_branch(a, RefName::from("refs/heads/b"))
+        .unwrap();
+    assert_eq!(state.tab(b).unwrap(), &before_b);
+    assert_eq!(state.tab(c).unwrap(), &before_c);
+    state.go_home(a).unwrap();
+    assert_eq!(state.tab(a).unwrap().route, Route::Home);
+    assert_eq!(state.tab(b).unwrap(), &before_b);
+    assert_eq!(state.projects().len(), 1);
+    assert_round_trip(&state);
+}
+
+#[test]
+fn opening_a_repository_navigates_only_the_target_tab() {
+    let mut state = AppState::default();
+    let a = state.register_project(&info("a", "refs/heads/a")).unwrap();
+    let b = state.register_project(&info("b", "refs/heads/b")).unwrap();
+    let first = state.new_window().unwrap();
+    let tab = open(&mut state, a, first);
+    let other = state.new_window().unwrap();
+    let other_tab = open(&mut state, a, other);
+    let before = state.window(other).unwrap().clone();
+    state.open_project(b, tab).unwrap();
+    assert_eq!(state.window(first).unwrap().tabs.len(), 1);
+    assert_eq!(state.tab(tab).unwrap().route.project(), Some(b));
+    assert_eq!(state.tab(other_tab).unwrap().route.project(), Some(a));
+    assert_eq!(state.window(other).unwrap(), &before);
+    assert_eq!(state.active_window(), Some(other));
+    assert_round_trip(&state);
+}
+
+#[test]
+fn worktrees_share_metadata_not_tab_identity_or_live_navigation() {
     let mut state = AppState::default();
     let main = info("repo", "refs/heads/a");
     let mut linked = main.clone();
     linked.directory = std::env::temp_dir().join("linked");
     linked.current_branch = Some(RefName::from("refs/heads/b"));
     let project = state.register_project(&main).unwrap();
-    assert_eq!(state.register_project(&linked).unwrap(), project);
+    let window = state.new_window().unwrap();
+    let a = open(&mut state, project, window);
+    let same_project = state.register_project(&linked).unwrap();
+    let b = open(&mut state, same_project, window);
+    assert_eq!(same_project, project);
+    assert_ne!(a, b);
     assert_eq!(state.projects().len(), 1);
-    assert_eq!(
-        state.project(project).unwrap().selected_branch,
-        main.current_branch
-    );
+    assert_eq!(context(&state, a).selected_branch, main.current_branch);
     assert_round_trip(&state);
 }
 
 #[test]
-fn opening_an_existing_project_focuses_its_window_without_duplicate_tabs() {
+fn closing_a_tab_retains_a_reopening_snapshot_without_closing_other_routes() {
     let mut state = AppState::default();
-    let id = state
-        .register_project(&info("one", "refs/heads/a"))
+    let project = state
+        .register_project(&info("repo", "refs/heads/a"))
         .unwrap();
-    let first = state.new_window().unwrap();
-    state.open_project(id, first).unwrap();
-    let second = state.new_window().unwrap();
-    assert_eq!(state.open_project(id, second).unwrap(), first);
-    assert_eq!(state.active_window(), Some(first));
-    assert_eq!(state.windows()[0].tabs, [id]);
-    assert!(state.windows()[1].tabs.is_empty());
-    assert_round_trip(&state);
-}
-
-#[test]
-fn closing_and_reopening_retains_context_but_not_closed_tabs() {
-    let mut state = AppState::default();
-    let one = state
-        .register_project(&info("one", "refs/heads/a"))
+    let window = state.new_window().unwrap();
+    let a = open(&mut state, project, window);
+    let b = open(&mut state, project, window);
+    let before_b = state.tab(b).unwrap().clone();
+    state
+        .select_branch(a, RefName::from("refs/heads/review"))
         .unwrap();
-    let two = state
-        .register_project(&info("two", "refs/heads/b"))
-        .unwrap();
-    let first = state.new_window().unwrap();
-    state.open_project(one, first).unwrap();
-    state.open_project(two, first).unwrap();
-    let projects = state.projects().to_vec();
-    state.close_project(two);
-    assert_eq!(state.windows()[0].tabs, [one]);
-    assert_eq!(state.windows()[0].active_tab, Some(one));
-    assert_eq!(state.projects(), projects);
-    state.close_window(first);
+    let saved = context(&state, a).clone();
+    state.close_tab(a);
+    assert_eq!(state.tab(b).unwrap(), &before_b);
+    let reopened = open(&mut state, project, window);
+    assert_ne!(a, reopened);
+    assert_eq!(context(&state, reopened), &saved);
+    state.close_window(window);
     assert!(state.windows().is_empty());
-    assert_eq!(state.active_window(), None);
-    assert_eq!(state.projects(), projects);
-    let next = state.new_window().unwrap();
-    state.open_project(two, next).unwrap();
-    assert_eq!(state.projects(), projects);
-    assert_eq!(state.windows()[0].tabs, [two]);
+    assert_eq!(state.project(project).unwrap().last_review, saved);
     assert_round_trip(&state);
 }
 
 #[test]
-fn moving_and_reordering_projects_preserves_context_and_removes_only_empty_sources() {
+fn moving_tabs_preserves_route_ids_and_context_and_only_removes_empty_sources() {
     let mut state = AppState::default();
-    let one = state
-        .register_project(&info("one", "refs/heads/a"))
-        .unwrap();
-    let two = state
-        .register_project(&info("two", "refs/heads/b"))
+    let project = state
+        .register_project(&info("repo", "refs/heads/a"))
         .unwrap();
     let source = state.new_window().unwrap();
-    state.open_project(one, source).unwrap();
-    state.open_project(two, source).unwrap();
-    state.move_project(two, source, 0).unwrap();
-    assert_eq!(state.windows()[0].tabs, [two, one]);
-    let empty = state.new_window().unwrap();
-    let target = state.new_window().unwrap();
-    let projects = state.projects().to_vec();
-    state.move_project(one, target, 0).unwrap();
-    state.move_project(two, target, 1).unwrap();
-    assert_eq!(state.projects(), projects);
-    assert!(!state.windows().iter().any(|window| window.id == source));
-    assert!(state.windows().iter().any(|window| window.id == empty));
+    let a = open(&mut state, project, source);
+    let b = open(&mut state, project, source);
+    state
+        .select_branch(a, RefName::from("refs/heads/different"))
+        .unwrap();
+    let saved = state.tab(a).unwrap().clone();
+    state.move_tab(b, source, 0).unwrap();
     assert_eq!(
         state
-            .windows()
-            .iter()
-            .find(|window| window.id == target)
+            .window(source)
             .unwrap()
-            .tabs,
-        [one, two]
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>(),
+        [b, a]
     );
+    let empty = state.new_window().unwrap();
+    let target = state.new_window().unwrap();
+    state.move_tab(a, target, 0).unwrap();
+    state.move_tab(b, target, 1).unwrap();
+    assert_eq!(state.tab(a).unwrap(), &saved);
+    assert!(state.window(source).is_err());
+    assert!(state.window(empty).is_ok());
+    state.close_tab(a);
+    assert!(state.window(empty).is_ok());
     assert_eq!(state.active_window(), Some(target));
     assert_round_trip(&state);
 }
@@ -180,15 +263,17 @@ fn moving_and_reordering_projects_preserves_context_and_removes_only_empty_sourc
 #[test]
 fn whole_model_round_trips_without_resolving_repositories() {
     let mut state = AppState::default();
-    let id = state
-        .register_project(&info("nonexistent-kestrel-repository", "refs/heads/a"))
+    let project = state
+        .register_project(&info("nonexistent-repository", "refs/heads/a"))
         .unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
     state
-        .set_comparison(id, BaseSelection::Default, comparison("refs/heads/a"))
+        .set_comparison(tab, BaseSelection::Default, comparison("refs/heads/a"))
         .unwrap();
     state
         .set_browsing(
-            id,
+            tab,
             &RefName::from("refs/heads/a"),
             Browsing {
                 file: Some(GitPath(b"unusual\n\xff".to_vec())),
@@ -196,8 +281,7 @@ fn whole_model_round_trips_without_resolving_repositories() {
             },
         )
         .unwrap();
-    let window = state.new_window().unwrap();
-    state.open_project(id, window).unwrap();
+    state.new_tab(window).unwrap();
     assert_round_trip(&state);
 }
 
@@ -216,38 +300,54 @@ fn non_utf8_local_paths_round_trip_losslessly() {
 }
 
 #[test]
-fn malformed_state_is_rejected_during_deserialization() {
+fn malformed_routes_and_contexts_are_rejected_during_deserialization() {
     let mut state = AppState::default();
     let project = state
         .register_project(&info("one", "refs/heads/a"))
         .unwrap();
     let window = state.new_window().unwrap();
-    state.open_project(project, window).unwrap();
+    let tab = open(&mut state, project, window);
     state
-        .set_comparison(project, BaseSelection::Default, comparison("refs/heads/a"))
+        .set_comparison(tab, BaseSelection::Default, comparison("refs/heads/a"))
         .unwrap();
     let json = serde_json::to_value(&state).unwrap();
     let mut bad = json.clone();
     bad["windows"][0]["tabs"]
         .as_array_mut()
         .unwrap()
-        .push(serde_json::to_value(project).unwrap());
+        .push(serde_json::to_value(state.tab(tab).unwrap()).unwrap());
     assert!(serde_json::from_value::<AppState>(bad).is_err());
-    let mut bad = json.clone();
-    bad["next_id"] = serde_json::json!(1);
-    assert!(serde_json::from_value::<AppState>(bad).is_err());
-    let mut bad = json.clone();
-    bad["projects"][0]["selected_branch"] =
-        serde_json::to_value(RefName::from("refs/heads/missing")).unwrap();
-    assert!(serde_json::from_value::<AppState>(bad).is_err());
-    let mut bad = json.clone();
-    bad["projects"][0]["reviews"][0]["base"] =
-        serde_json::to_value(BaseSelection::Explicit(RefName::from("refs/heads/other"))).unwrap();
-    assert!(serde_json::from_value::<AppState>(bad).is_err());
-    let mut bad = json;
-    bad["projects"][0]["reviews"][0]["browsing"]["file"] =
-        serde_json::to_value(GitPath::from("../outside")).unwrap();
-    assert!(serde_json::from_value::<AppState>(bad).is_err());
+    for (pointer, value) in [
+        ("/next_id", serde_json::json!(1)),
+        ("/windows/0/active_tab", serde_json::json!(999)),
+        (
+            "/windows/0/tabs/0/route/Repository/project",
+            serde_json::json!(999),
+        ),
+        (
+            "/windows/0/tabs/0/route/Repository/review/selected_branch",
+            serde_json::to_value(RefName::from("refs/heads/missing")).unwrap(),
+        ),
+        (
+            "/windows/0/tabs/0/route/Repository/review/reviews/0/base",
+            serde_json::to_value(BaseSelection::Explicit("refs/heads/other".into())).unwrap(),
+        ),
+        (
+            "/windows/0/tabs/0/route/Repository/review/reviews/0/browsing/file",
+            serde_json::to_value(GitPath::from("../outside")).unwrap(),
+        ),
+        (
+            "/projects/0/selected_branch",
+            serde_json::to_value(RefName::from("refs/heads/missing")).unwrap(),
+        ),
+    ] {
+        let mut bad = json.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            serde_json::from_value::<AppState>(bad).is_err(),
+            "{pointer}"
+        );
+    }
 }
 
 #[test]
@@ -256,19 +356,24 @@ fn rejected_transitions_leave_the_model_unchanged() {
     let project = state
         .register_project(&info("one", "refs/heads/a"))
         .unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
+    let home = state.new_tab(window).unwrap();
     let before = state.clone();
-    assert!(state.move_project(project, WindowId(100), 0).is_err());
-    assert!(
-        state
-            .select_branch(project, RefName::from("not-a-ref"))
-            .is_err()
-    );
+    assert!(state.new_tab(WindowId(100)).is_err());
+    assert!(state.open_project(project, TabId(100)).is_err());
+    assert!(state.open_project(ProjectId(100), home).is_err());
+    assert!(state.go_home(TabId(100)).is_err());
+    assert!(state.select_tab(TabId(100)).is_err());
+    assert!(state.move_tab(tab, WindowId(100), 0).is_err());
+    assert!(state.select_branch(home, "refs/heads/a".into()).is_err());
+    assert!(state.select_branch(tab, "not-a-ref".into()).is_err());
     assert!(state.register_project(&info("bad", "not-a-ref")).is_err());
     assert!(
         state
             .set_comparison(
-                project,
-                BaseSelection::Explicit(RefName::from("refs/heads/other")),
+                tab,
+                BaseSelection::Explicit("refs/heads/other".into()),
                 comparison("refs/heads/a")
             )
             .is_err()
@@ -276,7 +381,7 @@ fn rejected_transitions_leave_the_model_unchanged() {
     assert!(
         state
             .set_comparison(
-                project,
+                tab,
                 BaseSelection::Default,
                 comparison("refs/heads/unknown")
             )
@@ -285,11 +390,11 @@ fn rejected_transitions_leave_the_model_unchanged() {
     assert!(
         state
             .set_browsing(
-                project,
-                &RefName::from("refs/heads/a"),
+                tab,
+                &"refs/heads/a".into(),
                 Browsing {
-                    file: Some(GitPath::from("../outside")),
-                    ..Browsing::default()
+                    file: Some("../outside".into()),
+                    ..Default::default()
                 }
             )
             .is_err()
@@ -303,54 +408,63 @@ fn generated_transitions_preserve_selections_identities_and_serializability() {
     for seed in 0..16_u64 {
         let mut random = seed;
         let mut state = AppState::default();
-        let projects: Vec<_> = (0..3)
+        let projects = (0..3)
             .map(|i| {
                 state
                     .register_project(&info(&format!("repo-{i}"), "refs/heads/a"))
                     .unwrap()
             })
-            .collect();
+            .collect::<Vec<_>>();
         for step in 0..256 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let project = projects[(random >> 32) as usize % projects.len()];
             if state.windows().is_empty() {
                 state.new_window().unwrap();
             }
             let window = state.windows()[(random >> 16) as usize % state.windows().len()].id;
-            match random % 7 {
+            if state.window(window).unwrap().tabs.is_empty() {
+                state.new_tab(window).unwrap();
+            }
+            let tab = state.window(window).unwrap().tabs[0].id;
+            let project = projects[(random >> 32) as usize % projects.len()];
+            match random % 9 {
                 0 => {
                     state.new_window().unwrap();
                 }
                 1 => {
-                    state.open_project(project, window).unwrap();
+                    state.new_tab(window).unwrap();
                 }
-                2 => state.close_project(project),
-                3 => state.close_window(window),
-                4 => state.move_project(project, window, step % 4).unwrap(),
+                2 => {
+                    state.open_project(project, tab).unwrap();
+                }
+                3 => state.close_tab(tab),
+                4 => state.close_window(window),
                 5 => {
-                    let name = format!("refs/heads/branch-{}", step % 3);
-                    state
-                        .select_branch(project, RefName::from(name.as_str()))
-                        .unwrap();
-                    state
-                        .set_comparison(project, BaseSelection::Default, comparison(&name))
-                        .unwrap();
+                    let target = state.windows().last().unwrap().id;
+                    state.move_tab(tab, target, step % 4).unwrap();
+                }
+                6 => {
+                    state.go_home(tab).unwrap();
+                }
+                7 => {
+                    state.select_tab(tab).unwrap();
                 }
                 _ => {
-                    let branch = state
-                        .project(project)
-                        .unwrap()
-                        .selected_branch
-                        .clone()
+                    state.open_project(project, tab).unwrap();
+                    let name = format!("refs/heads/branch-{}", step % 3);
+                    state
+                        .select_branch(tab, RefName::from(name.as_str()))
+                        .unwrap();
+                    state
+                        .set_comparison(tab, BaseSelection::Default, comparison(&name))
                         .unwrap();
                     state
                         .set_browsing(
-                            project,
-                            &branch,
+                            tab,
+                            &RefName::from(name.as_str()),
                             Browsing {
-                                file: Some(GitPath::from("file.rs")),
+                                file: Some("file.rs".into()),
                                 first_visible_line: step as u32,
-                                ..Browsing::default()
+                                ..Default::default()
                             },
                         )
                         .unwrap();
@@ -358,15 +472,15 @@ fn generated_transitions_preserve_selections_identities_and_serializability() {
             }
             let mut open = HashSet::new();
             for window in state.windows() {
-                assert!(
-                    window
-                        .tabs
-                        .iter()
-                        .all(|tab| projects.contains(tab) && open.insert(*tab))
-                );
+                for tab in &window.tabs {
+                    assert!(open.insert(tab.id));
+                    if let Some(project) = tab.route.project() {
+                        assert!(projects.contains(&project));
+                    }
+                }
                 assert_eq!(window.active_tab.is_none(), window.tabs.is_empty());
                 if let Some(active) = window.active_tab {
-                    assert!(window.tabs.contains(&active));
+                    assert!(window.tabs.iter().any(|tab| tab.id == active));
                 }
             }
             assert_round_trip(&state);

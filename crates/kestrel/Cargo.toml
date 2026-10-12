@@ -23,8 +23,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+[lints]
+workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

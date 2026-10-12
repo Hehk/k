@@ -117,6 +117,11 @@ pub enum Msg {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowCommand {
+    NewTab,
+    LayoutChanged {
+        tabs: Vec<TabId>,
+        active: Option<TabId>,
+    },
     OpenDetached {
         request: DragToken,
         tab: Tab,
@@ -180,6 +185,56 @@ pub struct Model {
 }
 
 impl Model {
+    pub fn with_tabs(source: u64, tabs: Vec<Tab>, active: Option<TabId>) -> Self {
+        Self {
+            next_tab_id: tabs
+                .iter()
+                .map(|tab| tab.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            tabs,
+            active,
+            hovered: None,
+            next_drag: DragToken { source, serial: 1 },
+            phase: Phase::Idle,
+            geometry: Geometry::default(),
+            generation: 0,
+            animation: None,
+        }
+    }
+
+    pub fn synchronize(&mut self, tabs: Vec<Tab>, active: Option<TabId>) -> Vec<Command> {
+        if self.tabs == tabs && self.active == active {
+            return Vec::new();
+        }
+        let from = self.samples();
+        self.tabs = tabs;
+        self.active = active;
+        self.hovered = self.hovered.filter(|id| self.tab_index(*id).is_some());
+        let mut commands = Vec::new();
+        match self.phase {
+            Phase::Dragging { tab, .. } | Phase::Detaching { tab, .. }
+                if self.tab_index(tab).is_none() =>
+            {
+                self.phase = Phase::Idle;
+                commands.push(Command::StopDrag);
+                commands.push(Command::RestoreFocus);
+            }
+            _ => {}
+        }
+        if let Some(id) = active {
+            commands.push(Command::Reveal(id));
+        }
+        self.animate(from, &mut commands);
+        commands
+    }
+
+    pub fn selection(&self) -> (Vec<TabId>, Option<TabId>) {
+        (self.tabs.iter().map(|tab| tab.id).collect(), self.active)
+    }
+
+    #[cfg(test)]
     pub fn new(source: u64) -> Self {
         Self::with_tab(
             source,
@@ -191,6 +246,7 @@ impl Model {
         )
     }
 
+    #[cfg(test)]
     pub fn with_tab(source: u64, tab: Tab, next_tab_id: TabId) -> Self {
         Self {
             active: Some(tab.id),
@@ -332,7 +388,10 @@ impl Model {
             if self.active == Some(id) {
                 self.active = Some(self.tabs[index.min(self.tabs.len() - 1)].id);
             }
-            commands.push(Command::Reveal(self.active.unwrap()));
+            commands.push(Command::Reveal(
+                self.active
+                    .expect("a nonempty tab bar retains its selection"),
+            ));
             self.animate(from, commands);
         }
     }
@@ -397,17 +456,22 @@ impl Model {
                 }
             }
             Msg::SelectNext | Msg::SelectPrevious if self.phase == Phase::Idle => {
-                let index = self.tab_index(self.active.unwrap()).unwrap();
-                let count = self.tabs.len();
-                let next = if message == Msg::SelectNext {
-                    (index + 1) % count
-                } else {
-                    (index + count - 1) % count
-                };
-                self.select_tab(self.tabs[next].id, &mut commands);
+                if let Some(index) = self.active.and_then(|active| self.tab_index(active)) {
+                    let count = self.tabs.len();
+                    let next = if message == Msg::SelectNext {
+                        (index + 1) % count
+                    } else {
+                        (index + count - 1) % count
+                    };
+                    self.select_tab(self.tabs[next].id, &mut commands);
+                }
             }
             Msg::CloseActive if self.phase == Phase::Idle => {
-                self.remove_tab(self.active.unwrap(), &mut commands);
+                if let Some(active) = self.active {
+                    self.remove_tab(active, &mut commands);
+                } else {
+                    commands.push(Command::Window(WindowCommand::Close));
+                }
             }
             Msg::Close(id) if self.phase == Phase::Idle => {
                 self.remove_tab(id, &mut commands);
@@ -468,7 +532,12 @@ impl Model {
                         };
                         commands.push(Command::Window(WindowCommand::OpenDetached {
                             request: token,
-                            tab: self.tabs[self.tab_index(tab).unwrap()].clone(),
+                            tab: self
+                                .tabs
+                                .iter()
+                                .find(|item| item.id == tab)
+                                .expect("drag source remains in the tab bar until detach succeeds")
+                                .clone(),
                             next_tab_id: self.next_tab_id,
                         }));
                     } else {

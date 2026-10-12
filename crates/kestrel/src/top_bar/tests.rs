@@ -1,5 +1,28 @@
+mod harness;
+use harness::Harness;
+
 use super::*;
 use gpui::{Entity, Modifiers, Point, TestAppContext, VisualTestContext, point};
+
+#[gpui::test]
+fn managed_add_requests_a_new_tab_without_creating_a_placeholder_tab(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    let (bar, cx) =
+        cx.add_window_view(|window, cx| TopBar::for_workspace(vec![], None, window, cx));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let received = commands.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&bar, move |_, command, _| {
+            received.borrow_mut().push(command.clone())
+        })
+        .detach()
+    });
+    cx.update(|window, cx| bar.update(cx, |bar, cx| bar.dispatch(Msg::Add, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(*commands.borrow(), [WindowCommand::NewTab]);
+    assert!(bar.read_with(cx, |bar, _| bar.active_tab().is_none()));
+}
 
 struct Host {
     bar: Entity<TopBar>,
@@ -114,7 +137,7 @@ fn restoring_drag_focus_does_not_override_a_new_focus_owner(cx: &mut TestAppCont
 
 fn setup(cx: &mut TestAppContext, count: usize) -> (Entity<TopBar>, &mut VisualTestContext) {
     cx.update(bind_keys);
-    let (root, cx) = cx.add_window_view(|window, cx| crate::Kestrel::new(None, window, cx));
+    let (root, cx) = cx.add_window_view(|window, cx| Harness::new(None, window, cx));
     let bar = root.read_with(cx, |root, _| root.top_bar.clone());
     cx.update(|window, cx| {
         bar.update(cx, |bar, cx| {
@@ -253,11 +276,7 @@ fn last_tab_transfer_closes_only_the_source_window(cx: &mut TestAppContext) {
     assert_eq!(windows.len(), 1);
     assert!(windows[0] != source);
     assert!(bar.read_with(cx, |bar, _| bar.active_tab().is_none()));
-    let destination = windows[0]
-        .downcast::<crate::Kestrel>()
-        .unwrap()
-        .root(cx)
-        .unwrap();
+    let destination = windows[0].downcast::<Harness>().unwrap().root(cx).unwrap();
     destination.read_with(cx, |root, cx| {
         assert_eq!(root.top_bar.read(cx).active_tab().unwrap().id, 1);
         assert_ne!(root.top_bar.entity_id(), bar.entity_id());

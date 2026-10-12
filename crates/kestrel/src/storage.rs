@@ -13,7 +13,7 @@ use crate::state::AppState;
 #[cfg(test)]
 mod tests;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum Error {

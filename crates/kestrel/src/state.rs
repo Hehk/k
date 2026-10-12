@@ -14,8 +14,23 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProjectId(u64);
 
+impl ProjectId {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TabId(u64);
+
+impl TabId {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BaseSelection {
@@ -68,11 +83,17 @@ pub struct Project {
     pub directory: PathBuf,
     #[serde(with = "local_path")]
     pub common_dir: PathBuf,
+    #[serde(flatten)]
+    pub last_review: ReviewContext,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewContext {
     pub selected_branch: Option<RefName>,
     pub reviews: Vec<BranchReview>,
 }
 
-impl Project {
+impl ReviewContext {
     fn select_branch(&mut self, branch: RefName) -> Result<(), StateError> {
         if !branch.is_branch() {
             return Err(StateError("invalid branch ref"));
@@ -89,6 +110,37 @@ impl Project {
         Ok(())
     }
 
+    fn check_loaded(&self) -> Result<(), StateError> {
+        let mut branches = HashSet::new();
+        for review in &self.reviews {
+            if !review.branch.is_branch() || !branches.insert(&review.branch) {
+                return Err(StateError("invalid or duplicate branch review"));
+            }
+            if let BaseSelection::Explicit(base) = &review.base
+                && !base.is_branch()
+            {
+                return Err(StateError("invalid base ref"));
+            }
+            if let Some(comparison) = &review.comparison {
+                if comparison.branch != review.branch || !comparison.base.is_branch() {
+                    return Err(StateError("comparison does not match its branch review"));
+                }
+                if let BaseSelection::Explicit(base) = &review.base
+                    && *base != comparison.base
+                {
+                    return Err(StateError("comparison does not match its selected base"));
+                }
+            }
+            review.browsing.check_paths()?;
+        }
+        if let Some(branch) = &self.selected_branch
+            && !branches.contains(branch)
+        {
+            return Err(StateError("selected branch has no review context"));
+        }
+        Ok(())
+    }
+
     pub fn active_review(&self) -> Option<&BranchReview> {
         self.reviews
             .iter()
@@ -97,10 +149,41 @@ impl Project {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Route {
+    Home,
+    Repository {
+        project: ProjectId,
+        review: ReviewContext,
+    },
+}
+
+impl Route {
+    pub fn project(&self) -> Option<ProjectId> {
+        match self {
+            Self::Home => None,
+            Self::Repository { project, .. } => Some(*project),
+        }
+    }
+
+    pub fn review(&self) -> Option<&ReviewContext> {
+        match self {
+            Self::Home => None,
+            Self::Repository { review, .. } => Some(review),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tab {
+    pub id: TabId,
+    pub route: Route,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWindow {
     pub id: WindowId,
-    pub tabs: Vec<ProjectId>,
-    pub active_tab: Option<ProjectId>,
+    pub tabs: Vec<Tab>,
+    pub active_tab: Option<TabId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -161,11 +244,40 @@ impl AppState {
         self.active_window
     }
 
+    pub fn window(&self, id: WindowId) -> Result<&WorkspaceWindow, StateError> {
+        self.windows
+            .iter()
+            .find(|window| window.id == id)
+            .ok_or(StateError("unknown window"))
+    }
+
+    pub fn focus_window(&mut self, id: WindowId) -> Result<(), StateError> {
+        self.window(id)?;
+        self.active_window = Some(id);
+        Ok(())
+    }
+
     pub fn project(&self, id: ProjectId) -> Result<&Project, StateError> {
         self.projects
             .iter()
             .find(|project| project.id == id)
             .ok_or(StateError("unknown project"))
+    }
+
+    pub fn tab(&self, id: TabId) -> Result<&Tab, StateError> {
+        self.windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .find(|tab| tab.id == id)
+            .ok_or(StateError("unknown tab"))
+    }
+
+    fn tab_mut(&mut self, id: TabId) -> Result<&mut Tab, StateError> {
+        self.windows
+            .iter_mut()
+            .flat_map(|window| &mut window.tabs)
+            .find(|tab| tab.id == id)
+            .ok_or(StateError("unknown tab"))
     }
 
     fn allocate(&mut self) -> Result<u64, StateError> {
@@ -196,28 +308,23 @@ impl AppState {
             id: ProjectId(self.allocate()?),
             directory: info.directory.clone(),
             common_dir: info.common_dir.clone(),
-            selected_branch: None,
-            reviews: Vec::new(),
+            last_review: ReviewContext::default(),
         };
         if let Some(branch) = &info.current_branch {
-            project.select_branch(branch.clone())?;
+            project.last_review.select_branch(branch.clone())?;
         }
         let id = project.id;
         self.projects.push(project);
         Ok(id)
     }
 
-    pub fn select_branch(&mut self, project: ProjectId, branch: RefName) -> Result<(), StateError> {
-        self.projects
-            .iter_mut()
-            .find(|item| item.id == project)
-            .ok_or(StateError("unknown project"))?
-            .select_branch(branch)
+    pub fn select_branch(&mut self, tab: TabId, branch: RefName) -> Result<(), StateError> {
+        self.edit_review(tab, |review| review.select_branch(branch))
     }
 
     pub fn set_comparison(
         &mut self,
-        project: ProjectId,
+        tab: TabId,
         base: BaseSelection,
         comparison: Comparison,
     ) -> Result<(), StateError> {
@@ -229,36 +336,62 @@ impl AppState {
         {
             return Err(StateError("comparison does not match its selected base"));
         }
-        let review = self.review_mut(project, &comparison.branch)?;
-        review.base = base;
-        review.comparison = Some(comparison);
-        Ok(())
+        self.edit_review(tab, |context| {
+            let review = context
+                .reviews
+                .iter_mut()
+                .find(|review| review.branch == comparison.branch)
+                .ok_or(StateError("unknown branch review"))?;
+            review.base = base;
+            review.comparison = Some(comparison);
+            Ok(())
+        })
     }
 
     pub fn set_browsing(
         &mut self,
-        project: ProjectId,
+        tab: TabId,
         branch: &RefName,
         browsing: Browsing,
     ) -> Result<(), StateError> {
         browsing.check_paths()?;
-        self.review_mut(project, branch)?.browsing = browsing;
+        self.edit_review(tab, |context| {
+            let review = context
+                .reviews
+                .iter_mut()
+                .find(|review| review.branch == *branch)
+                .ok_or(StateError("unknown branch review"))?;
+            review.browsing = browsing;
+            Ok(())
+        })
+    }
+
+    fn edit_review(
+        &mut self,
+        tab: TabId,
+        change: impl FnOnce(&mut ReviewContext) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
+        let Route::Repository { review, .. } = &mut self.tab_mut(tab)?.route else {
+            return Err(StateError("tab is not a repository route"));
+        };
+        change(review)?;
+        self.remember_tab(tab);
         Ok(())
     }
 
-    fn review_mut(
-        &mut self,
-        project: ProjectId,
-        branch: &RefName,
-    ) -> Result<&mut BranchReview, StateError> {
-        self.projects
-            .iter_mut()
-            .find(|item| item.id == project)
-            .ok_or(StateError("unknown project"))?
-            .reviews
-            .iter_mut()
-            .find(|review| review.branch == *branch)
-            .ok_or(StateError("unknown branch review"))
+    fn remember_tab(&mut self, tab: TabId) {
+        if let Route::Repository { project, review } = &self
+            .tab(tab)
+            .expect("tab was checked before remembering its review")
+            .route
+        {
+            let (project, review) = (*project, review.clone());
+            self.projects
+                .iter_mut()
+                .find(|item| item.id == project)
+                .expect("repository routes reference registered projects")
+                .last_review = review;
+        }
     }
 
     pub fn new_window(&mut self) -> Result<WindowId, StateError> {
@@ -272,79 +405,127 @@ impl AppState {
         Ok(id)
     }
 
-    pub fn open_project(
-        &mut self,
-        project: ProjectId,
-        window: WindowId,
-    ) -> Result<WindowId, StateError> {
-        self.project(project)?;
-        let target = self
+    pub fn new_tab(&mut self, window: WindowId) -> Result<TabId, StateError> {
+        let index = self
             .windows
             .iter()
             .position(|item| item.id == window)
             .ok_or(StateError("unknown window"))?;
-        let index = self
-            .windows
-            .iter()
-            .position(|window| window.tabs.contains(&project));
-        let window = &mut self.windows[index.unwrap_or(target)];
-        if index.is_none() {
-            window.tabs.push(project);
-        }
-        window.active_tab = Some(project);
+        let id = TabId(self.allocate()?);
+        let window = &mut self.windows[index];
+        window.tabs.push(Tab {
+            id,
+            route: Route::Home,
+        });
+        window.active_tab = Some(id);
         self.active_window = Some(window.id);
-        Ok(window.id)
+        Ok(id)
     }
 
-    pub fn close_project(&mut self, project: ProjectId) {
-        self.windows.retain_mut(|window| {
-            let Some(index) = window.tabs.iter().position(|tab| *tab == project) else {
-                return true;
-            };
-            window.tabs.remove(index);
-            if window.active_tab == Some(project) {
-                window.active_tab = window
-                    .tabs
-                    .get(index.min(window.tabs.len().saturating_sub(1)))
-                    .copied();
+    pub fn select_tab(&mut self, tab: TabId) -> Result<(), StateError> {
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|window| window.tabs.iter().any(|item| item.id == tab))
+            .ok_or(StateError("unknown tab"))?;
+        window.active_tab = Some(tab);
+        self.active_window = Some(window.id);
+        Ok(())
+    }
+
+    pub fn go_home(&mut self, tab: TabId) -> Result<(), StateError> {
+        self.tab(tab)?;
+        self.remember_tab(tab);
+        self.tab_mut(tab)?.route = Route::Home;
+        Ok(())
+    }
+
+    pub fn open_project(&mut self, project: ProjectId, tab: TabId) -> Result<(), StateError> {
+        let review = self.project(project)?.last_review.clone();
+        if self.tab(tab)?.route.project() == Some(project) {
+            return Ok(());
+        }
+        self.remember_tab(tab);
+        self.tab_mut(tab)?.route = Route::Repository { project, review };
+        Ok(())
+    }
+
+    pub fn close_tab(&mut self, id: TabId) {
+        if let Some(source) = self
+            .windows
+            .iter()
+            .position(|window| window.tabs.iter().any(|tab| tab.id == id))
+        {
+            self.remember_tab(id);
+            self.take_tab(id);
+            if self.windows[source].tabs.is_empty() {
+                self.windows.remove(source);
             }
-            !window.tabs.is_empty()
-        });
-        self.repair_active_window();
+            self.repair_active_window();
+        }
     }
 
     pub fn close_window(&mut self, id: WindowId) {
+        if let Ok(window) = self.window(id) {
+            let active = window.active_tab;
+            let tabs = window.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+            for tab in tabs {
+                self.remember_tab(tab);
+            }
+            if let Some(active) = active {
+                self.remember_tab(active);
+            }
+        }
         self.windows.retain(|window| window.id != id);
         self.repair_active_window();
     }
 
-    pub fn move_project(
+    pub fn move_tab(
         &mut self,
-        project: ProjectId,
+        tab: TabId,
         target: WindowId,
         index: usize,
     ) -> Result<(), StateError> {
-        self.project(project)?;
-        if !self.windows.iter().any(|window| window.id == target) {
-            return Err(StateError("unknown target window"));
-        }
-        self.windows.retain_mut(|window| {
-            let contained = window.tabs.contains(&project);
-            window.tabs.retain(|tab| *tab != project);
-            if window.active_tab == Some(project) {
-                window.active_tab = window.tabs.last().copied();
-            }
-            window.id == target || !contained || !window.tabs.is_empty()
-        });
+        let source = self
+            .windows
+            .iter()
+            .find(|window| window.tabs.iter().any(|item| item.id == tab))
+            .ok_or(StateError("unknown tab"))?
+            .id;
+        self.window(target)?;
+        let tab = self.take_tab(tab);
         let window = self
             .windows
             .iter_mut()
             .find(|window| window.id == target)
-            .unwrap();
-        window.tabs.insert(index.min(window.tabs.len()), project);
-        window.active_tab = Some(project);
+            .expect("removing a tab preserves the validated destination window");
+        window.active_tab = Some(tab.id);
+        window.tabs.insert(index.min(window.tabs.len()), tab);
+        self.windows
+            .retain(|window| window.id != source || source == target || !window.tabs.is_empty());
         self.active_window = Some(target);
         Ok(())
+    }
+
+    fn take_tab(&mut self, id: TabId) -> Tab {
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|window| window.tabs.iter().any(|tab| tab.id == id))
+            .expect("tab was checked before removal");
+        let index = window
+            .tabs
+            .iter()
+            .position(|tab| tab.id == id)
+            .expect("owning window contains the tab");
+        let tab = window.tabs.remove(index);
+        if window.active_tab == Some(id) {
+            window.active_tab = window
+                .tabs
+                .get(index.min(window.tabs.len().saturating_sub(1)))
+                .map(|tab| tab.id);
+        }
+        tab
     }
 
     fn repair_active_window(&mut self) {
@@ -367,47 +548,26 @@ impl AppState {
             if !project.directory.is_absolute() || !project.common_dir.is_absolute() {
                 return Err(StateError("repository paths must be absolute"));
             }
-            let mut branches = HashSet::new();
-            for review in &project.reviews {
-                if !review.branch.is_branch() || !branches.insert(&review.branch) {
-                    return Err(StateError("invalid or duplicate branch review"));
-                }
-                if let BaseSelection::Explicit(base) = &review.base
-                    && !base.is_branch()
-                {
-                    return Err(StateError("invalid base ref"));
-                }
-                if let Some(comparison) = &review.comparison {
-                    if comparison.branch != review.branch || !comparison.base.is_branch() {
-                        return Err(StateError("comparison does not match its branch review"));
-                    }
-                    if let BaseSelection::Explicit(base) = &review.base
-                        && *base != comparison.base
-                    {
-                        return Err(StateError("comparison does not match its selected base"));
-                    }
-                }
-                review.browsing.check_paths()?;
-            }
-            if let Some(branch) = &project.selected_branch
-                && !branches.contains(branch)
-            {
-                return Err(StateError("selected branch has no review context"));
-            }
+            project.last_review.check_loaded()?;
         }
         let projects: HashSet<_> = self.projects.iter().map(|project| project.id).collect();
-        let mut open = HashSet::new();
         for window in &self.windows {
             if !ids.insert(window.id.0) {
                 return Err(StateError("duplicate window ID"));
             }
             for tab in &window.tabs {
-                if !projects.contains(tab) || !open.insert(tab) {
-                    return Err(StateError("unknown or duplicate open project"));
+                if !ids.insert(tab.id.0) {
+                    return Err(StateError("duplicate tab ID"));
+                }
+                if let Route::Repository { project, review } = &tab.route {
+                    if !projects.contains(project) {
+                        return Err(StateError("unknown route project"));
+                    }
+                    review.check_loaded()?;
                 }
             }
             match window.active_tab {
-                Some(tab) if window.tabs.contains(&tab) => {}
+                Some(id) if window.tabs.iter().any(|tab| tab.id == id) => {}
                 None if window.tabs.is_empty() => {}
                 _ => return Err(StateError("invalid active tab")),
             }

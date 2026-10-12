@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn shared_tabs_are_a_projection_and_cancel_drags_only_when_the_source_disappears() {
+    let mut tab = Tab {
+        id: 42,
+        title: "saved - review".into(),
+    };
+    let mut model = Model::with_tabs(7, vec![tab.clone()], Some(42));
+    assert!(model.synchronize(vec![tab.clone()], Some(42)).is_empty());
+    let token = model.next_drag();
+    model.update(Msg::DragStarted { tab: 42, token });
+    tab.title = "saved - another-review".into();
+    let commands = model.synchronize(vec![tab], Some(42));
+    assert_eq!(model.drag_token(), Some(token));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::Window(_) | Command::StopDrag))
+    );
+    let commands = model.synchronize(vec![], None);
+    assert_eq!(model.selection(), (vec![], None));
+    assert!(model.drag_token().is_none());
+    assert!(commands.contains(&Command::StopDrag));
+    assert!(commands.contains(&Command::RestoreFocus));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::Window(_)))
+    );
+}
+
 struct Harness {
     model: Model,
     commands: Vec<Command>,

@@ -13,7 +13,8 @@ fn state() -> AppState {
         })
         .unwrap();
     let window = state.new_window().unwrap();
-    state.open_project(project, window).unwrap();
+    let tab = state.new_tab(window).unwrap();
+    state.open_project(project, tab).unwrap();
     state
 }
 
@@ -61,9 +62,10 @@ fn first_launch_and_successive_atomic_saves_round_trip() {
 }
 
 #[test]
-fn corrupt_or_future_state_is_preserved_before_replacement() {
+fn corrupt_or_unsupported_state_is_preserved_before_replacement() {
     for bytes in [
         b"{broken".as_slice(),
+        br#"{"version":1,"state":{"projects":[],"windows":[],"active_window":null,"next_id":1}}"#,
         br#"{"version":999,"future-data":"keep me"}"#,
     ] {
         let directory = TempDir::new().unwrap();
@@ -126,10 +128,10 @@ fn rejected_transitions_do_not_change_the_saved_snapshot() {
     store.save(&state()).unwrap();
     let previous = fs::read(&path).unwrap();
     let mut current = state();
-    let project = current.projects()[0].id;
+    let tab = current.windows()[0].active_tab.unwrap();
     assert!(
         current
-            .select_branch(project, RefName::from("invalid"))
+            .select_branch(tab, RefName::from("invalid"))
             .is_err()
     );
     store.save(&current).unwrap();
