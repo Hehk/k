@@ -476,6 +476,82 @@ fn full_title_and_button_tooltips_use_gpui_hover_delay(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn long_titles_stay_inside_their_slots_and_clear_of_close_buttons(cx: &mut TestAppContext) {
+    let (bar, cx) = setup(cx, 12);
+    let title = "k — experiment/top-bar-overflow/日本語/🦅".repeat(4);
+    let selector = Box::leak(format!("tab-title-{title}").into_boxed_str());
+    cx.update(|window, cx| {
+        bar.update(cx, |bar, cx| {
+            let tabs = (1..=12)
+                .map(|id| Tab {
+                    id,
+                    title: if id == 1 {
+                        title.clone()
+                    } else {
+                        "Home".into()
+                    },
+                })
+                .collect();
+            bar.synchronize(tabs, Some(1), window, cx);
+        });
+    });
+    for width in [1200., 600., 300.] {
+        cx.simulate_resize(gpui::size(px(width), px(500.)));
+        redraw(cx);
+        redraw(cx);
+        let slot = cx.debug_bounds("tab-slot-1").unwrap();
+        let close = cx.debug_bounds("close-tab-1").unwrap();
+        let label = cx.debug_bounds(selector).unwrap();
+        assert_eq!(label.left(), slot.left() + px(TITLE_INSET));
+        assert_eq!(label.right(), slot.right() - px(CLOSE_BUTTON_SPACE));
+        assert!(label.right() < close.left());
+    }
+    let close = cx.debug_bounds("close-tab-1").unwrap().center();
+    cx.simulate_click(close, Modifiers::none());
+    redraw(cx);
+    assert_eq!(order(&bar, cx), (2..=12).collect::<Vec<_>>());
+}
+
+#[gpui::test]
+fn drag_preview_keeps_long_title_within_the_pill(cx: &mut TestAppContext) {
+    let title = "k — experiment/top-bar-overflow/日本語/🦅".repeat(4);
+    let selector = Box::leak(format!("tab-title-{title}").into_boxed_str());
+    let (_, cx) = cx.add_window_view(|_, _| DragPreview { title, width: 100. });
+    redraw(cx);
+    let label = cx.debug_bounds(selector).unwrap();
+    assert_eq!(label.left(), px(TITLE_INSET));
+    assert_eq!(label.right(), px(100. - CLOSE_BUTTON_SPACE));
+}
+
+#[gpui::test]
+fn single_long_title_respects_the_titlebar_controls(cx: &mut TestAppContext) {
+    let (bar, cx) = setup(cx, 1);
+    let title = "k — experiment/top-bar-overflow/日本語/🦅".repeat(4);
+    let selector = Box::leak(format!("tab-title-{title}").into_boxed_str());
+    cx.update(|window, cx| {
+        bar.update(cx, |bar, cx| {
+            bar.synchronize(
+                vec![Tab {
+                    id: 1,
+                    title: title.clone(),
+                }],
+                Some(1),
+                window,
+                cx,
+            );
+        });
+    });
+    for width in [1200., 600., 300.] {
+        cx.simulate_resize(gpui::size(px(width), px(500.)));
+        redraw(cx);
+        redraw(cx);
+        let label = cx.debug_bounds(selector).unwrap();
+        assert_eq!(label.left(), px(SIDE_WIDTH + CLOSE_BUTTON_SPACE));
+        assert_eq!(label.right(), px(width - SIDE_WIDTH - CLOSE_BUTTON_SPACE));
+    }
+}
+
+#[gpui::test]
 fn measured_scroll_and_resize_feed_back_into_model(cx: &mut TestAppContext) {
     let (bar, cx) = setup(cx, 12);
     cx.simulate_resize(gpui::size(px(600.), px(500.)));

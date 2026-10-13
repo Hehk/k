@@ -1,8 +1,10 @@
 pub mod model;
 mod shortcuts;
+mod title;
 mod tooltip;
 
 pub use shortcuts::{TabAction, bind_keys};
+use title::{CLOSE_BUTTON_SPACE, TITLE_INSET, title};
 use tooltip::tooltip;
 
 #[cfg(test)]
@@ -39,16 +41,13 @@ impl Render for DragPreview {
             .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
-            .justify_center()
-            .text_center()
-            .px(px(30.))
+            .pl(px(TITLE_INSET))
+            .pr(px(CLOSE_BUTTON_SPACE))
             .rounded_full()
             .bg(rgb(0xffffff))
             .shadow_md()
             .text_sm()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(self.title.clone())
+            .child(title(self.title.clone(), gpui::white(), None, false))
     }
 }
 
@@ -318,14 +317,11 @@ impl TopBar {
                     .h_full()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .text_center()
-                    .px(px(30.))
+                    .pl(px(TITLE_INSET))
+                    .pr(px(CLOSE_BUTTON_SPACE))
                     .rounded_full()
                     .cursor_pointer()
                     .text_sm()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
                     .text_color(if tab.active {
                         rgb(0x25262a)
                     } else {
@@ -336,7 +332,18 @@ impl TopBar {
                         this.hover(|this| this.bg(gpui::white().opacity(0.55)))
                     })
                     .opacity(if tab.hidden { 0. } else { tab.opacity })
-                    .child(tab.tab.title.clone())
+                    .child(title(
+                        tab.tab.title.clone(),
+                        if tab.active {
+                            gpui::white()
+                        } else {
+                            rgb(0xe5e6e9).into()
+                        },
+                        (!tab.active).then(|| {
+                            gpui::Hsla::from(rgb(0xe5e6e9)).blend(gpui::white().opacity(0.55))
+                        }),
+                        false,
+                    ))
                     .when(tab.close_visible, |this| {
                         this.child(self.render_close_button(id, cx))
                     }),
@@ -501,14 +508,15 @@ impl Render for TopBar {
                                 .h(px(TAB_HEIGHT))
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .text_center()
-                                .px(px(30.))
+                                .px(px(CLOSE_BUTTON_SPACE))
                                 .text_sm()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
                                 .text_color(rgb(0x25262a))
-                                .child(tab.tab.title.clone())
+                                .child(title(
+                                    tab.tab.title.clone(),
+                                    rgb(0xf1f2f4).into(),
+                                    None,
+                                    true,
+                                ))
                                 .opacity(if tab.hidden { 0. } else { 1. })
                                 .when(tab.close_visible, |this| {
                                     this.child(self.render_close_button(tab.tab.id, cx))
