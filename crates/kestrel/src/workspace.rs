@@ -9,7 +9,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task, WeakEntity,
 };
 use kestrel::{
-    state::{AppState, Project, Route, StateError, WindowId},
+    state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
     storage::{self, Store},
 };
 
@@ -175,6 +175,15 @@ impl Workspace {
 
     pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
+    }
+
+    pub fn navigate(
+        &mut self,
+        tab: TabId,
+        action: Navigation,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StateError> {
+        self.edit(|state| state.navigate(tab, action), cx)
     }
 
     pub fn edit<R>(
@@ -391,7 +400,7 @@ pub fn set_tab_layout(
         }
     }
     if let Some(tab) = selected {
-        state.select_tab(tab)?;
+        state.navigate(tab, Navigation::SelectTab)?;
     }
     Ok(())
 }

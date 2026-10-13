@@ -7,7 +7,7 @@ use gpui::{
 use kestrel::{
     git::{Repository, RepositoryInfo},
     query::{Query, QueryResult},
-    state::{ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId},
+    state::{Navigation, ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId},
 };
 
 use crate::{
@@ -197,18 +197,14 @@ impl Kestrel {
                 let Some(tab) = self.active_tab(cx).map(|tab| tab.id) else {
                     return;
                 };
-                let result = self.workspace.update(cx, |workspace, cx| {
-                    workspace.edit(
-                        |state| {
-                            if command == Command::Back {
-                                state.go_back(tab)
-                            } else {
-                                state.go_forward(tab)
-                            }
-                        },
-                        cx,
-                    )
-                });
+                let action = if command == Command::Back {
+                    Navigation::Back
+                } else {
+                    Navigation::Forward
+                };
+                let result = self
+                    .workspace
+                    .update(cx, |workspace, cx| workspace.navigate(tab, action, cx));
                 self.error = result.err().map(|error| error.to_string());
                 cx.notify();
             }
@@ -330,7 +326,7 @@ impl Kestrel {
             return;
         };
         let result = self.workspace.update(cx, |workspace, cx| {
-            workspace.edit(|state| state.open_project(project, target.tab), cx)
+            workspace.navigate(target.tab, Navigation::OpenProject(project), cx)
         });
         self.error = result.err().map(|error| error.to_string());
         cx.notify();
@@ -428,7 +424,7 @@ impl Kestrel {
             workspace.edit(
                 |state| {
                     let project = state.register_project(&info)?;
-                    state.open_project(project, target.tab)
+                    state.navigate(target.tab, Navigation::OpenProject(project))
                 },
                 cx,
             )

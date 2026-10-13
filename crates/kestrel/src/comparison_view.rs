@@ -11,7 +11,7 @@ use gpui::{
 use kestrel::{
     query::{Query, QueryResult},
     review::{Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewUnavailable, RefName},
-    state::{BaseSelection, Browsing, RepositoryPage, Route},
+    state::{BaseSelection, Browsing, ComparisonChange, Navigation, RepositoryPage, Route},
 };
 
 use crate::{
@@ -54,6 +54,7 @@ pub struct ComparisonView {
     review: Query<ReviewData>,
     review_task: Option<Task<()>>,
     review_revision: u64,
+    review_change: ComparisonChange,
     patch_key: Option<FileChange>,
     patch: Query<LoadedPatch>,
     patch_task: Option<PendingPatch>,
@@ -256,6 +257,7 @@ impl ComparisonView {
             review: Query::new(),
             review_task: None,
             review_revision: 0,
+            review_change: ComparisonChange::Resolve,
             patch_key: None,
             patch: Query::new(),
             patch_task: None,
@@ -350,6 +352,13 @@ impl ComparisonView {
             return;
         }
         self.review_revision += 1;
+        self.review_change = if latest {
+            ComparisonChange::LoadLatest
+        } else if override_base.is_some() {
+            ComparisonChange::ChangeBase
+        } else {
+            ComparisonChange::Resolve
+        };
         let revision = self.review_revision;
         self.patch_revision += 1;
         self.patch_task.take();
@@ -413,8 +422,13 @@ impl ComparisonView {
                 let repository = self.repository.read(cx);
                 let tab = repository.tab();
                 let result = repository.workspace().update(cx, |workspace, cx| {
-                    workspace.edit(
-                        |state| state.set_comparison(tab, base.clone(), comparison.clone()),
+                    workspace.navigate(
+                        tab,
+                        Navigation::ComparisonLoaded {
+                            change: self.review_change,
+                            base: base.clone(),
+                            comparison: comparison.clone(),
+                        },
                         cx,
                     )
                 });
