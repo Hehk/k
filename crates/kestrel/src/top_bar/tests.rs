@@ -1,4 +1,5 @@
 mod harness;
+mod zoom;
 use harness::Harness;
 
 use super::*;
