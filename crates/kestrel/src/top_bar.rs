@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use gpui::{
     Context, DispatchPhase, DragMoveEvent, EventEmitter, FocusHandle, KeyDownEvent, MouseButton,
-    MouseUpEvent, Pixels, Point, ScrollHandle, WeakFocusHandle, Window, WindowControlArea, canvas,
-    div, prelude::*, px, rgb,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, WeakFocusHandle, Window,
+    WindowControlArea, canvas, div, prelude::*, px, rgb,
 };
 pub use model::TITLEBAR_HEIGHT;
 use model::{
@@ -420,8 +420,14 @@ impl Render for TopBar {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.dispatch(Msg::BackgroundPressed, window, cx);
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if event.click_count == 2 {
+                        if this.interactive() && !window.is_fullscreen() {
+                            window.dispatch_action(Box::new(crate::commands::Command::Zoom), cx);
+                        }
+                    } else {
+                        this.dispatch(Msg::BackgroundPressed, window, cx);
+                    }
                 }),
             )
             .on_drag_move::<TabDrag>(cx.listener(
