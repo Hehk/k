@@ -1,7 +1,13 @@
+mod branch_view;
 mod commands;
+mod comparison_view;
+mod controls;
 #[cfg(any(debug_assertions, feature = "frame-metrics"))]
 mod debug_panel;
 mod native;
+mod repository_model;
+mod repository_view;
+mod text_input;
 mod top_bar;
 mod workspace;
 mod workspace_window;

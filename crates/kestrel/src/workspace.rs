@@ -281,15 +281,22 @@ pub fn project_title(project: &Project) -> String {
 pub fn tab_title(state: &AppState, tab: &kestrel::state::Tab) -> String {
     match &tab.route {
         Route::Home => "Home".into(),
-        Route::Repository { project, review } => {
+        Route::Repository {
+            project,
+            review,
+            page,
+            ..
+        } => {
             let name = project_title(
                 state
                     .project(*project)
                     .expect("repository routes reference registered projects"),
             );
-            match &review.selected_branch {
-                Some(branch) => format!("{name} - {}", branch.label()),
-                None => name,
+            match (page, &review.selected_branch) {
+                (kestrel::state::RepositoryPage::Comparison, Some(branch)) => {
+                    format!("{name} - {}", branch.label())
+                }
+                _ => name,
             }
         }
     }

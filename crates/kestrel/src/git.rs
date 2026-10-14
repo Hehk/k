@@ -48,6 +48,7 @@ pub struct RepositoryInfo {
 pub struct Branch {
     pub name: RefName,
     pub tip: ObjectId,
+    pub committed_at: i64,
     pub remote: bool,
 }
 
@@ -101,8 +102,10 @@ impl Repository {
                 }
                 continue;
             }
+            let commit = reference.peel_to_commit()?;
             branches.push(Branch {
-                tip: ObjectId(reference.peel_to_commit()?.id()),
+                tip: ObjectId(commit.id()),
+                committed_at: commit.time().seconds(),
                 remote: name.0.starts_with(b"refs/remotes/"),
                 name,
             });

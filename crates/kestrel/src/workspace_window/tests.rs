@@ -2,6 +2,8 @@ use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
 use kestrel::{review::RefName, state::AppState, storage::Store};
 
 use super::*;
+
+mod branches;
 use crate::workspace::LoadedWorkspace;
 
 fn shared(cx: &mut TestAppContext, path: PathBuf) -> Entity<Workspace> {
@@ -26,6 +28,7 @@ fn active(workspace: &Entity<Workspace>, index: usize, cx: &TestAppContext) -> T
 }
 
 fn redraw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear());
     cx.run_until_parked();
 }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use gpui::{
     App, Context, Entity, FocusHandle, PathPromptOptions, Subscription, Task, Window, WindowBounds,
@@ -11,6 +11,7 @@ use kestrel::{
 
 use crate::{
     commands::{self, Command},
+    repository_view::RepositoryView,
     top_bar::{
         TabAction, TopBar,
         model::{Msg, WindowCommand},
@@ -39,6 +40,8 @@ pub struct Kestrel {
     focus: FocusHandle,
     selection: Option<(TabId, ProjectId)>,
     repository: RepositoryStatus,
+    repository_view: Option<Entity<RepositoryView>>,
+    repository_views: HashMap<TabId, (ProjectId, Entity<RepositoryView>)>,
     repository_task: Option<Task<()>>,
     request: u64,
     open_task: Option<Task<()>>,
@@ -76,7 +79,11 @@ impl Kestrel {
                     this.open_task.take();
                     this.opening = None;
                 }
+                let previous = this.selection;
                 this.load_project(cx);
+                if previous != this.selection && this.top_bar.read(cx).interactive() {
+                    window.focus(&this.focus);
+                }
                 cx.notify();
             }),
             cx.observe_window_bounds(window, |_, _, cx| commands::refresh_later(cx)),
@@ -98,6 +105,8 @@ impl Kestrel {
             focus,
             selection: None,
             repository: RepositoryStatus::Loading,
+            repository_view: None,
+            repository_views: HashMap::new(),
             repository_task: None,
             request: 0,
             open_task: None,
@@ -444,6 +453,15 @@ impl Kestrel {
                     .ok()
                     .and_then(|tab| tab.route.project().map(|project| (tab.id, project)))
             });
+        let state = self.workspace.read(cx).state();
+        self.repository_views.retain(|tab, (project, _)| {
+            state.window(self.id).is_ok_and(|window| {
+                window
+                    .tabs
+                    .iter()
+                    .any(|item| item.id == *tab && item.route.project() == Some(*project))
+            })
+        });
         if self.selection == active {
             return;
         }
@@ -451,7 +469,13 @@ impl Kestrel {
         self.request += 1;
         self.repository_task.take();
         self.repository = RepositoryStatus::Loading;
-        let Some((_, project)) = active else { return };
+        self.repository_view = None;
+        let Some((tab, project)) = active else { return };
+        if let Some((_, view)) = self.repository_views.get(&tab) {
+            self.repository_view = Some(view.clone());
+            self.repository = RepositoryStatus::Ready;
+            return;
+        }
         let project = self
             .workspace
             .read(cx)
@@ -461,6 +485,7 @@ impl Kestrel {
             .clone();
         let request = self.request;
         self.repository_task = Some(cx.spawn(async move |this, cx| {
+            let view_project = project.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -474,7 +499,17 @@ impl Kestrel {
             let _ = this.update(cx, |this, cx| {
                 if this.request == request {
                     this.repository = match result {
-                        Ok(()) => RepositoryStatus::Ready,
+                        Ok(()) => {
+                            let workspace = this.workspace.clone();
+                            let window = this.id;
+                            let project = view_project.id;
+                            let view = cx.new(|cx| {
+                                RepositoryView::new(workspace, window, tab, view_project, cx)
+                            });
+                            this.repository_views.insert(tab, (project, view.clone()));
+                            this.repository_view = Some(view);
+                            RepositoryStatus::Ready
+                        }
                         Err(error) => RepositoryStatus::Unavailable(error),
                     };
                     cx.notify();
@@ -567,13 +602,12 @@ impl Render for Kestrel {
                     .id("content-frame")
                     .relative()
                     .flex_1()
+                    .min_h_0()
                     .mx_2()
                     .mb_2()
                     .p_4()
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .justify_center()
                     .gap_3()
                     .rounded_lg()
                     .border_1()
@@ -581,9 +615,6 @@ impl Render for Kestrel {
                     .bg(rgb(0xffffff))
                     .child(
                         div()
-                            .absolute()
-                            .top_3()
-                            .left_3()
                             .flex()
                             .gap_2()
                             .child(self.navigation_button(
@@ -605,7 +636,10 @@ impl Render for Kestrel {
                     })
                     .when(directory.is_some(), |this| match &self.repository {
                         RepositoryStatus::Loading => this.child("Opening repository…"),
-                        RepositoryStatus::Ready => this.child("Repository ready."),
+                        RepositoryStatus::Ready => this
+                            .when_some(self.repository_view.clone(), |this, view| {
+                                this.child(div().flex_1().min_h_0().child(view))
+                            }),
                         RepositoryStatus::Unavailable(error) => this
                             .child(
                                 div()

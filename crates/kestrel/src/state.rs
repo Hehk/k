@@ -148,12 +148,36 @@ impl ReviewContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchSort {
+    #[default]
+    Newest,
+    Name,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchList {
+    pub query: String,
+    pub sort: BranchSort,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepositoryPage {
+    #[default]
+    Branches,
+    Comparison,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Route {
     Home,
     Repository {
         project: ProjectId,
         review: ReviewContext,
+        #[serde(default)]
+        page: RepositoryPage,
+        #[serde(default)]
+        branches: BranchList,
     },
 }
 
@@ -170,6 +194,24 @@ impl Route {
             Self::Home => None,
             Self::Repository { review, .. } => Some(review),
         }
+    }
+}
+
+fn resume_branch_list(previous: &Route, next: &mut Route) {
+    if let Route::Repository {
+        project: from,
+        review,
+        ..
+    } = previous
+        && let Route::Repository {
+            project: to,
+            review: remembered,
+            page: RepositoryPage::Branches,
+            ..
+        } = next
+        && from == to
+    {
+        *remembered = review.clone();
     }
 }
 
@@ -346,7 +388,23 @@ impl AppState {
     }
 
     pub fn select_branch(&mut self, tab: TabId, branch: RefName) -> Result<(), StateError> {
-        self.edit_review(tab, |review| review.select_branch(branch))
+        let mut route = self.tab(tab)?.route.clone();
+        let Route::Repository { review, page, .. } = &mut route else {
+            return Err(StateError("tab is not a repository route"));
+        };
+        review.select_branch(branch)?;
+        *page = RepositoryPage::Comparison;
+        self.tab_mut(tab)?.visit(route);
+        self.remember_tab(tab);
+        Ok(())
+    }
+
+    pub fn set_branch_list(&mut self, tab: TabId, list: BranchList) -> Result<(), StateError> {
+        let Route::Repository { branches, .. } = &mut self.tab_mut(tab)?.route else {
+            return Err(StateError("tab is not a repository route"));
+        };
+        *branches = list;
+        Ok(())
     }
 
     pub fn set_comparison(
@@ -407,7 +465,9 @@ impl AppState {
     }
 
     fn remember_tab(&mut self, tab: TabId) {
-        if let Route::Repository { project, review } = &self
+        if let Route::Repository {
+            project, review, ..
+        } = &self
             .tab(tab)
             .expect("tab was checked before remembering its review")
             .route
@@ -459,9 +519,18 @@ impl AppState {
     ) -> Result<TabId, StateError> {
         self.window(window)?;
         for route in tab.routes() {
-            if let Route::Repository { project, review } = route {
+            if let Route::Repository {
+                project,
+                review,
+                page,
+                ..
+            } = route
+            {
                 self.project(*project)?;
                 review.check_loaded()?;
+                if *page == RepositoryPage::Comparison && review.active_review().is_none() {
+                    return Err(StateError("comparison page has no branch"));
+                }
             }
         }
         let id = TabId(self.allocate()?);
@@ -496,13 +565,33 @@ impl AppState {
     }
 
     pub fn open_project(&mut self, project: ProjectId, tab: TabId) -> Result<(), StateError> {
-        let review = self.project(project)?.last_review.clone();
-        if self.tab(tab)?.route.project() == Some(project) {
-            return Ok(());
-        }
+        let remembered = &self.project(project)?.last_review;
+        let route = match &self.tab(tab)?.route {
+            Route::Repository {
+                project: current,
+                page: RepositoryPage::Branches,
+                ..
+            } if *current == project => return Ok(()),
+            Route::Repository {
+                project: current,
+                review,
+                branches,
+                ..
+            } if *current == project => Route::Repository {
+                project,
+                review: review.clone(),
+                page: RepositoryPage::Branches,
+                branches: branches.clone(),
+            },
+            _ => Route::Repository {
+                project,
+                review: remembered.clone(),
+                page: RepositoryPage::Branches,
+                branches: BranchList::default(),
+            },
+        };
         self.remember_tab(tab);
-        self.tab_mut(tab)?
-            .visit(Route::Repository { project, review });
+        self.tab_mut(tab)?.visit(route);
         Ok(())
     }
 
@@ -511,6 +600,8 @@ impl AppState {
         let Some(route) = tab.back.pop() else {
             return Ok(());
         };
+        let mut route = route;
+        resume_branch_list(&tab.route, &mut route);
         tab.forward.push(std::mem::replace(&mut tab.route, route));
         self.remember_tab(id);
         Ok(())
@@ -521,6 +612,8 @@ impl AppState {
         let Some(route) = tab.forward.pop() else {
             return Ok(());
         };
+        let mut route = route;
+        resume_branch_list(&tab.route, &mut route);
         tab.back.push(std::mem::replace(&mut tab.route, route));
         self.remember_tab(id);
         Ok(())
@@ -636,11 +729,20 @@ impl AppState {
                     return Err(StateError("duplicate tab ID"));
                 }
                 for route in tab.routes() {
-                    if let Route::Repository { project, review } = route {
+                    if let Route::Repository {
+                        project,
+                        review,
+                        page,
+                        ..
+                    } = route
+                    {
                         if !projects.contains(project) {
                             return Err(StateError("unknown route project"));
                         }
                         review.check_loaded()?;
+                        if *page == RepositoryPage::Comparison && review.active_review().is_none() {
+                            return Err(StateError("comparison page has no branch"));
+                        }
                     }
                 }
             }

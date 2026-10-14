@@ -161,6 +161,92 @@ fn inserting_a_tab_validates_its_entire_history_before_mutating_state() {
 }
 
 #[test]
+fn branch_lists_restore_filters_and_remember_pins_without_changing_other_tabs() {
+    let mut state = AppState::default();
+    let project = state
+        .register_project(&info("repo", "refs/heads/a"))
+        .unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
+    let other = open(&mut state, project, window);
+    let other_before = state.tab(other).unwrap().clone();
+    let filters = BranchList {
+        query: "topic".into(),
+        sort: BranchSort::Name,
+    };
+    state.set_branch_list(tab, filters.clone()).unwrap();
+    state.select_branch(tab, "refs/heads/topic".into()).unwrap();
+    let pinned = comparison("refs/heads/topic");
+    state
+        .set_comparison(tab, BaseSelection::Default, pinned.clone())
+        .unwrap();
+    state
+        .set_browsing(
+            tab,
+            &"refs/heads/topic".into(),
+            Browsing {
+                file: Some("saved.rs".into()),
+                first_visible_line: 75,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    state.go_back(tab).unwrap();
+    let Route::Repository {
+        page,
+        branches,
+        review,
+        ..
+    } = &state.tab(tab).unwrap().route
+    else {
+        panic!()
+    };
+    assert_eq!(*page, RepositoryPage::Branches);
+    assert_eq!(branches, &filters);
+    assert_eq!(
+        review.active_review().unwrap().comparison,
+        Some(pinned.clone())
+    );
+    state.go_forward(tab).unwrap();
+    assert_eq!(
+        context(&state, tab)
+            .active_review()
+            .unwrap()
+            .browsing
+            .first_visible_line,
+        75
+    );
+    state.go_back(tab).unwrap();
+    state.select_branch(tab, "refs/heads/topic".into()).unwrap();
+    assert_eq!(
+        context(&state, tab).active_review().unwrap().comparison,
+        Some(pinned)
+    );
+    assert_eq!(state.tab(other).unwrap(), &other_before);
+    let target = state.new_window().unwrap();
+    let saved = state.tab(tab).unwrap().clone();
+    state.move_tab(tab, target, 0).unwrap();
+    assert_eq!(state.tab(tab).unwrap(), &saved);
+    assert_round_trip(&state);
+}
+
+#[test]
+fn comparison_pages_require_a_selected_branch_when_loading() {
+    let mut state = AppState::default();
+    let project = state
+        .register_project(&RepositoryInfo {
+            current_branch: None,
+            ..info("empty", "refs/heads/main")
+        })
+        .unwrap();
+    let window = state.new_window().unwrap();
+    open(&mut state, project, window);
+    let mut json = serde_json::to_value(state).unwrap();
+    json["windows"][0]["tabs"][0]["route"]["Repository"]["page"] = serde_json::json!("Comparison");
+    assert!(serde_json::from_value::<AppState>(json).is_err());
+}
+
+#[test]
 fn saved_tabs_without_history_start_with_empty_stacks() {
     let mut state = AppState::default();
     let project = state.register_project(&info("a", "refs/heads/a")).unwrap();
