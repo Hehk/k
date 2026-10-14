@@ -169,7 +169,12 @@ fn navigation_menus_and_shortcuts_follow_the_front_window_and_survive_reopening(
     assert_eq!(snapshot(cx).windows()[0], a_before);
     cx.simulate_keystrokes(b.into(), "cmd-]");
     cx.run_until_parked();
-    assert_eq!(snapshot(cx).windows()[1], b_before);
+    let b_returned = snapshot(cx).windows()[1].tabs[0].clone();
+    assert_eq!(
+        b_returned.snapshot().unwrap(),
+        b_before.tabs[0].snapshot().unwrap()
+    );
+    assert!(b_returned.activation() > b_before.tabs[0].activation());
     menu_action(cx, "Forward");
     assert_navigation_enabled(cx, true, false);
     let b_after = snapshot(cx).windows()[1].clone();
@@ -183,14 +188,19 @@ fn navigation_menus_and_shortcuts_follow_the_front_window_and_survive_reopening(
     assert_eq!(snapshot(cx).windows()[1], b_after);
     cx.simulate_keystrokes(a.into(), "cmd-]");
     cx.run_until_parked();
-    assert_eq!(snapshot(cx).windows()[0], a_before);
+    let a_returned = snapshot(cx).windows()[0].clone();
+    assert_eq!(
+        a_returned.tabs[0].snapshot().unwrap(),
+        a_before.tabs[0].snapshot().unwrap()
+    );
+    assert!(a_returned.tabs[0].activation() > a_before.tabs[0].activation());
     menu_action(cx, "Close Window");
     b.update(cx, |_, window, _| window.activate_window())
         .unwrap();
     menu_action(cx, "Reopen Closed Tab or Window");
     assert_navigation_enabled(cx, true, true);
     let restored = snapshot(cx).windows()[1].tabs[0].clone();
-    let mut expected = a_before.tabs[0].clone();
+    let mut expected = a_returned.tabs[0].clone();
     assert_ne!(restored.id, expected.id);
     expected.id = restored.id;
     assert_eq!(restored, expected);

@@ -1,5 +1,9 @@
 use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
-use kestrel::{review::RefName, state::AppState, storage::Store};
+use kestrel::{
+    review::RefName,
+    state::{AppState, Route},
+    storage::Store,
+};
 
 use super::*;
 
@@ -858,6 +862,61 @@ fn closing_the_last_home_tab_closes_only_its_window(cx: &mut TestAppContext) {
         assert_eq!(workspace.state().windows().len(), 1);
         assert_eq!(workspace.state().windows()[0].tabs[0].route, Route::Home);
     });
+}
+
+#[gpui::test]
+fn pending_open_tracks_activation_not_view_edits_or_route_equality(cx: &mut TestAppContext) {
+    for traverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = shared(cx, dir.path().join("state.json"));
+        let handle = cx.update(|cx| Kestrel::new_window(workspace.clone(), cx).unwrap());
+        let known = repository(&dir.path().join("known"));
+        let late = repository(&dir.path().join("late"));
+        handle
+            .update(cx, |root, _, cx| open(root, known, cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |root, _, cx| {
+                let target = root.open_target(cx).unwrap();
+                root.opening = Some(target.clone());
+                workspace.update(cx, |workspace, cx| {
+                    workspace
+                        .edit(
+                            |state| {
+                                state.set_branch_list(
+                                    target.tab,
+                                    kestrel::state::BranchList {
+                                        query: "updated filter".into(),
+                                        ..Default::default()
+                                    },
+                                )?;
+                                if traverse {
+                                    state.go_home(target.tab)?;
+                                    state.go_back(target.tab)?;
+                                }
+                                Ok(())
+                            },
+                            cx,
+                        )
+                        .unwrap();
+                });
+                let before = workspace.read(cx).state().clone();
+                // Deliver before observers can cancel the request or rebuild the view.
+                root.finish_open(target, Ok(Some(late)), cx);
+                let after = workspace.read(cx).state();
+                if traverse {
+                    assert_eq!(after, &before);
+                } else {
+                    assert_eq!(after.projects().len(), 2);
+                    assert_eq!(
+                        after.windows()[0].tabs[0].route.project(),
+                        Some(after.projects()[1].id)
+                    );
+                }
+            })
+            .unwrap();
+    }
 }
 
 #[gpui::test]

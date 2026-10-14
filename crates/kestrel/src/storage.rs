@@ -13,7 +13,8 @@ use crate::state::AppState;
 #[cfg(test)]
 mod tests;
 
-const VERSION: u32 = 2;
+// Version 3 stores compact, identified visits. Tab deserialization migrates v2 route stacks.
+const VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -167,11 +168,15 @@ fn state_path(
 
 fn decode(bytes: &[u8]) -> Result<AppState, Error> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
-    if value.get("version").and_then(|version| version.as_u64()) != Some(u64::from(VERSION)) {
+    if !value
+        .get("version")
+        .and_then(|version| version.as_u64())
+        .is_some_and(|version| (2..=u64::from(VERSION)).contains(&version))
+    {
         return Err(Error::Version);
     }
     let saved: Saved = serde_json::from_value(value)?;
-    if saved.version != VERSION {
+    if !(2..=VERSION).contains(&saved.version) {
         return Err(Error::Version);
     }
     Ok(saved.state)

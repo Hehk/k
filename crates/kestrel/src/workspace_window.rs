@@ -25,7 +25,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OpenTarget {
     tab: TabId,
-    route: Route,
+    activation: u64,
 }
 
 pub struct Kestrel {
@@ -374,7 +374,7 @@ impl Kestrel {
         let tab = state.tab(state.window(self.id).ok()?.active_tab?).ok()?;
         Some(OpenTarget {
             tab: tab.id,
-            route: tab.route.clone(),
+            activation: tab.activation(),
         })
     }
 
@@ -387,7 +387,7 @@ impl Kestrel {
                 window
                     .tabs
                     .iter()
-                    .any(|tab| tab.id == target.tab && tab.route == target.route)
+                    .any(|tab| tab.id == target.tab && tab.activation() == target.activation)
             })
     }
 

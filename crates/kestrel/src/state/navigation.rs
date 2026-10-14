@@ -1,6 +1,6 @@
 use super::{
     AppState, BaseSelection, BranchList, Browsing, ProjectId, RepositoryPage, Route, StateError,
-    TabId, resume_branch_list,
+    TabId,
 };
 use crate::review::{Comparison, RefName};
 
@@ -24,11 +24,13 @@ pub enum Navigation {
     SelectTab,
     SelectBranch(RefName),
     SetBranchList(BranchList),
+    /// Initial resolution; explicit retargets use ComparisonLoaded with their intent.
     SetComparison {
         base: BaseSelection,
         comparison: Comparison,
     },
     ComparisonLoaded {
+        activation: u64,
         change: ComparisonChange,
         base: BaseSelection,
         comparison: Comparison,
@@ -47,10 +49,11 @@ impl AppState {
             Navigation::Home => {
                 self.tab(id)?;
                 self.remember_tab(id);
-                self.tab_mut(id)?.visit(Route::Home);
+                self.tab_mut(id)?.visit(Route::Home)?;
             }
             Navigation::OpenProject(project) => {
-                let remembered = &self.project(project)?.last_review;
+                let fallback = &self.project(project)?.last_review;
+                let remembered = self.tab(id)?.remembered(project).unwrap_or(fallback);
                 let route = match &self.tab(id)?.route {
                     Route::Repository {
                         project: current,
@@ -76,25 +79,17 @@ impl AppState {
                     },
                 };
                 self.remember_tab(id);
-                self.tab_mut(id)?.visit(route);
+                self.tab_mut(id)?.visit(route)?;
             }
             Navigation::Back => {
-                let tab = self.tab_mut(id)?;
-                let Some(mut route) = tab.back.pop() else {
-                    return Ok(());
-                };
-                resume_branch_list(&tab.route, &mut route);
-                tab.forward.push(std::mem::replace(&mut tab.route, route));
-                self.remember_tab(id);
+                if self.tab_mut(id)?.traverse(true)? {
+                    self.remember_tab(id);
+                }
             }
             Navigation::Forward => {
-                let tab = self.tab_mut(id)?;
-                let Some(mut route) = tab.forward.pop() else {
-                    return Ok(());
-                };
-                resume_branch_list(&tab.route, &mut route);
-                tab.back.push(std::mem::replace(&mut tab.route, route));
-                self.remember_tab(id);
+                if self.tab_mut(id)?.traverse(false)? {
+                    self.remember_tab(id);
+                }
             }
             Navigation::SelectTab => {
                 let window = self
@@ -112,7 +107,7 @@ impl AppState {
                 };
                 review.select_branch(branch)?;
                 *page = RepositoryPage::Comparison;
-                self.tab_mut(id)?.visit(route);
+                self.tab_mut(id)?.visit(route)?;
                 self.remember_tab(id);
             }
             Navigation::SetBranchList(list) => {
@@ -121,28 +116,29 @@ impl AppState {
                 };
                 *branches = list;
             }
-            Navigation::SetComparison { base, comparison }
-            | Navigation::ComparisonLoaded {
-                base, comparison, ..
+            Navigation::SetComparison { base, comparison } => {
+                self.complete_comparison(id, ComparisonChange::Resolve, base, comparison)?;
+            }
+            Navigation::ComparisonLoaded {
+                activation,
+                change,
+                base,
+                comparison,
             } => {
-                if !comparison.base.is_branch() {
-                    return Err(StateError("invalid base ref"));
+                let tab = self.tab(id)?;
+                if tab.activation() != activation {
+                    return Ok(());
                 }
-                if let BaseSelection::Explicit(base) = &base
-                    && *base != comparison.base
-                {
-                    return Err(StateError("comparison does not match its selected base"));
+                if !matches!(
+                    tab.route,
+                    Route::Repository {
+                        page: RepositoryPage::Comparison,
+                        ..
+                    }
+                ) {
+                    return Err(StateError("tab is not a comparison page"));
                 }
-                self.edit_review(id, |context| {
-                    let review = context
-                        .reviews
-                        .iter_mut()
-                        .find(|review| review.branch == comparison.branch)
-                        .ok_or(StateError("unknown branch review"))?;
-                    review.base = base;
-                    review.comparison = Some(comparison);
-                    Ok(())
-                })?;
+                self.complete_comparison(id, change, base, comparison)?;
             }
             Navigation::SetBrowsing { branch, browsing } => {
                 browsing.check_paths()?;
@@ -157,6 +153,65 @@ impl AppState {
                 })?;
             }
         }
+        Ok(())
+    }
+
+    fn complete_comparison(
+        &mut self,
+        id: TabId,
+        change: ComparisonChange,
+        base: BaseSelection,
+        comparison: Comparison,
+    ) -> Result<(), StateError> {
+        if !comparison.base.is_branch() {
+            return Err(StateError("invalid base ref"));
+        }
+        if let BaseSelection::Explicit(base) = &base
+            && *base != comparison.base
+        {
+            return Err(StateError("comparison does not match its selected base"));
+        }
+        let mut route = self.tab(id)?.route.clone();
+        let Route::Repository { review, .. } = &mut route else {
+            return Err(StateError("tab is not a repository route"));
+        };
+        if review.selected_branch.as_ref() != Some(&comparison.branch) {
+            return Err(StateError("comparison does not match the selected branch"));
+        }
+        let review = review
+            .reviews
+            .iter_mut()
+            .find(|review| review.branch == comparison.branch)
+            .ok_or(StateError("unknown branch review"))?;
+        let changed = review
+            .comparison
+            .as_ref()
+            .is_some_and(|old| old != &comparison);
+        review.base = base;
+        review.comparison = Some(comparison);
+        // Revalidating restored pins must not replace another tab's newer remembered context.
+        if self.tab(id)?.route == route {
+            return Ok(());
+        }
+        match (change, changed) {
+            (ComparisonChange::Resolve, true) => {
+                return Err(StateError(
+                    "resolving a visit cannot advance its pinned comparison",
+                ));
+            }
+            (ComparisonChange::ChangeBase | ComparisonChange::LoadLatest, true) => {
+                self.tab_mut(id)?.visit(route)?;
+            }
+            (
+                ComparisonChange::Resolve
+                | ComparisonChange::ChangeBase
+                | ComparisonChange::LoadLatest,
+                false,
+            ) => {
+                self.tab_mut(id)?.route = route;
+            }
+        }
+        self.remember_tab(id);
         Ok(())
     }
 }

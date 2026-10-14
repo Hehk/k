@@ -138,10 +138,130 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     redraw(cx);
 }
 
+fn scroll(cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>, distance: f32) {
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-distance))),
+        ..Default::default()
+    });
+    redraw(cx);
+}
+
+#[gpui::test]
+fn diff_scroll_is_saved_and_restored_after_navigation_and_restart(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
+    fixture.commit(
+        "refs/heads/topic",
+        Some(main),
+        400,
+        &"added line\n".repeat(5000),
+    );
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch:refs/heads/topic");
+    let position = cx.debug_bounds("diff-line-1").unwrap().center();
+    scroll(cx, position, 1100.);
+    let before = workspace.read_with(cx, |workspace, _| {
+        workspace.state().tab(tab).unwrap().snapshot().unwrap()
+    });
+    assert_eq!(before.snapshot.view.browsing.first_visible_line, 50);
+    let selector = "diff-line-51";
+    let bounds = cx.debug_bounds(selector).unwrap();
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-]");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .snapshot()
+            .unwrap()),
+        before
+    );
+    assert_eq!(cx.debug_bounds(selector).unwrap().top(), bounds.top());
+    let state = workspace.read_with(cx, |workspace, _| workspace.state().clone());
+    cx.quit();
+    assert_eq!(
+        Store::new(fixture.dir.path().join("state.json"))
+            .load()
+            .unwrap()
+            .state,
+        state
+    );
+    // A new window/view tree must restore after its asynchronous patch and layout finish.
+    let reloaded = shared(cx, fixture.dir.path().join("state.json"));
+    let window = state.windows()[0].id;
+    let reopened = cx.cx.update(|cx| {
+        cx.set_global(crate::workspace::Session(reloaded.clone()));
+        Kestrel::open(reloaded.clone(), window, cx).unwrap()
+    });
+    let cx = &mut VisualTestContext::from_window(reopened.into(), cx);
+    redraw(cx);
+    assert_eq!(cx.debug_bounds(selector).unwrap().top(), bounds.top());
+    assert_eq!(
+        reloaded.read_with(cx, |workspace, _| workspace.state().clone()),
+        state
+    );
+}
+
+#[gpui::test]
+fn branch_list_scroll_returns_with_the_visit(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    for index in 0..100 {
+        fixture
+            .git
+            .reference(
+                &format!("refs/heads/branch{index:03}"),
+                fixture.topic,
+                true,
+                "fixture",
+            )
+            .unwrap();
+    }
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch-sort");
+    click(cx, "sort-name");
+    let position = cx
+        .debug_bounds("branch:refs/heads/branch000")
+        .unwrap()
+        .center();
+    scroll(cx, position, 1140.);
+    let before = workspace.read_with(cx, |workspace, _| {
+        workspace.state().tab(tab).unwrap().snapshot().unwrap()
+    });
+    assert!(before.snapshot.view.branches.first_visible_row > 0);
+    let bounds = cx.debug_bounds("branch:refs/heads/branch035").unwrap();
+    click(cx, "branch:refs/heads/branch035");
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .snapshot()
+            .unwrap()),
+        before
+    );
+    assert_eq!(
+        cx.debug_bounds("branch:refs/heads/branch035")
+            .unwrap()
+            .top(),
+        bounds.top()
+    );
+}
+
 #[gpui::test]
 fn restoring_windows_keeps_the_last_used_review_for_new_tabs(cx: &mut TestAppContext) {
     use kestrel::{
-        state::{AppState, BaseSelection, Browsing},
+        state::{AppState, BaseSelection, Browsing, ComparisonChange},
         storage::Store,
     };
 
@@ -187,10 +307,14 @@ fn restoring_windows_keeps_the_last_used_review_for_new_tabs(cx: &mut TestAppCon
     state.open_project(project, b).unwrap();
     state.select_branch(b, other.branch.clone()).unwrap();
     state
-        .set_comparison(
+        .navigate(
             b,
-            BaseSelection::Explicit(other.base.clone()),
-            other.clone(),
+            Navigation::ComparisonLoaded {
+                activation: state.tab(b).unwrap().activation(),
+                change: ComparisonChange::ChangeBase,
+                base: BaseSelection::Explicit(other.base.clone()),
+                comparison: other.clone(),
+            },
         )
         .unwrap();
     state
@@ -832,7 +956,27 @@ fn refresh_preserves_pins_and_only_load_latest_advances_them(cx: &mut TestAppCon
     });
     cx.simulate_keystrokes("cmd-[");
     redraw(cx);
-    click(cx, "branch:refs/heads/topic");
+    workspace.read_with(cx, |workspace, _| {
+        let comparison = workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .route
+            .review()
+            .unwrap()
+            .active_review()
+            .unwrap()
+            .comparison
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            comparison.commits.new.to_string(),
+            fixture.topic.to_string()
+        );
+        assert_eq!(comparison.base, "refs/heads/Alpha".into());
+    });
+    cx.simulate_keystrokes("cmd-]");
+    redraw(cx);
     workspace.read_with(cx, |workspace, _| {
         assert_eq!(
             workspace
@@ -926,6 +1070,79 @@ fn restoring_a_comparison_rebuilds_the_saved_commits_not_newer_refs(cx: &mut Tes
             latest.to_string()
         )
     });
+}
+
+#[gpui::test]
+fn unavailable_pins_survive_retry_and_returning_from_load_latest(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.git.workdir().unwrap()).unwrap();
+    let mut missing = repository
+        .compare(
+            &"refs/heads/topic".into(),
+            &"refs/remotes/origin/main".into(),
+        )
+        .unwrap();
+    missing.commits.new = "1111111111111111111111111111111111111111".parse().unwrap();
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    state.select_branch(tab, "refs/heads/topic".into())?;
+                    state.set_comparison(tab, kestrel::state::BaseSelection::Default, missing)
+                },
+                cx,
+            )
+            .unwrap();
+    });
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    redraw(cx);
+    let before = workspace.read_with(cx, |workspace, _| {
+        workspace.state().tab(tab).unwrap().snapshot().unwrap()
+    });
+    click(cx, "retry-review");
+    assert!(cx.debug_bounds("retry-review").is_some());
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .snapshot()
+            .unwrap()),
+        before
+    );
+    click(cx, "latest-review");
+    workspace.read_with(cx, |workspace, _| {
+        let tab = workspace.state().tab(tab).unwrap();
+        assert_ne!(tab.visit_id(), before.id);
+        assert_eq!(
+            tab.route
+                .review()
+                .unwrap()
+                .active_review()
+                .unwrap()
+                .comparison
+                .as_ref()
+                .unwrap()
+                .commits
+                .new
+                .to_string(),
+            fixture.topic.to_string()
+        );
+    });
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .snapshot()
+            .unwrap()),
+        before
+    );
+    assert!(cx.debug_bounds("retry-review").is_some());
 }
 
 #[gpui::test]

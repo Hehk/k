@@ -9,8 +9,11 @@ use crate::{
 };
 
 mod navigation;
+mod tab;
+mod visit;
 
 pub use navigation::{ComparisonChange, Navigation};
+pub use visit::{Destination, Snapshot, ViewState, Visit, VisitId};
 
 #[cfg(test)]
 mod tests;
@@ -99,6 +102,18 @@ pub struct ReviewContext {
 }
 
 impl ReviewContext {
+    fn remember_branch(&mut self, branch: BranchReview) {
+        if let Some(review) = self
+            .reviews
+            .iter_mut()
+            .find(|review| review.branch == branch.branch)
+        {
+            *review = branch;
+        } else {
+            self.reviews.push(branch);
+        }
+    }
+
     fn select_branch(&mut self, branch: RefName) -> Result<(), StateError> {
         if !branch.is_branch() {
             return Err(StateError("invalid branch ref"));
@@ -164,6 +179,8 @@ pub enum BranchSort {
 pub struct BranchList {
     pub query: String,
     pub sort: BranchSort,
+    #[serde(default)]
+    pub first_visible_row: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,55 +219,16 @@ impl Route {
     }
 }
 
-fn resume_branch_list(previous: &Route, next: &mut Route) {
-    if let Route::Repository {
-        project: from,
-        review,
-        ..
-    } = previous
-        && let Route::Repository {
-            project: to,
-            review: remembered,
-            page: RepositoryPage::Branches,
-            ..
-        } = next
-        && from == to
-    {
-        *remembered = review.clone();
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Tab {
     pub id: TabId,
     pub route: Route,
-    #[serde(default)]
-    back: Vec<Route>,
-    #[serde(default)]
-    forward: Vec<Route>,
-}
-
-impl Tab {
-    pub fn can_go_back(&self) -> bool {
-        !self.back.is_empty()
-    }
-
-    pub fn can_go_forward(&self) -> bool {
-        !self.forward.is_empty()
-    }
-
-    fn routes(&self) -> impl Iterator<Item = &Route> {
-        std::iter::once(&self.route)
-            .chain(&self.back)
-            .chain(&self.forward)
-    }
-
-    fn visit(&mut self, route: Route) {
-        if self.route != route {
-            self.back.push(std::mem::replace(&mut self.route, route));
-            self.forward.clear();
-        }
-    }
+    visit_id: VisitId,
+    next_visit: u64,
+    activation: u64,
+    back: Vec<Visit>,
+    forward: Vec<Visit>,
+    remembered: Vec<tab::Remembered>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,12 +455,7 @@ impl AppState {
             .ok_or(StateError("unknown window"))?;
         let id = TabId(self.allocate()?);
         let window = &mut self.windows[index];
-        window.tabs.push(Tab {
-            id,
-            route: Route::Home,
-            back: Vec::new(),
-            forward: Vec::new(),
-        });
+        window.tabs.push(Tab::new(id));
         window.active_tab = Some(id);
         self.active_window = Some(window.id);
         Ok(id)
@@ -495,6 +468,7 @@ impl AppState {
         mut tab: Tab,
     ) -> Result<TabId, StateError> {
         self.window(window)?;
+        tab.check_visits()?;
         for route in tab.routes() {
             if let Route::Repository {
                 project,
@@ -503,9 +477,9 @@ impl AppState {
                 ..
             } = route
             {
-                self.project(*project)?;
+                self.project(project)?;
                 review.check_loaded()?;
-                if *page == RepositoryPage::Comparison && review.active_review().is_none() {
+                if page == RepositoryPage::Comparison && review.active_review().is_none() {
                     return Err(StateError("comparison page has no branch"));
                 }
             }
@@ -652,6 +626,7 @@ impl AppState {
                 if !ids.insert(tab.id.0) {
                     return Err(StateError("duplicate tab ID"));
                 }
+                tab.check_visits()?;
                 for route in tab.routes() {
                     if let Route::Repository {
                         project,
@@ -660,11 +635,11 @@ impl AppState {
                         ..
                     } = route
                     {
-                        if !projects.contains(project) {
+                        if !projects.contains(&project) {
                             return Err(StateError("unknown route project"));
                         }
                         review.check_loaded()?;
-                        if *page == RepositoryPage::Comparison && review.active_review().is_none() {
+                        if page == RepositoryPage::Comparison && review.active_review().is_none() {
                             return Err(StateError("comparison page has no branch"));
                         }
                     }
