@@ -48,7 +48,6 @@ impl Render for DragPreview {
             .rounded_full()
             .bg(theme.paper)
             .text_color(theme.text)
-            .shadow_md()
             .text_sm()
             .child(title(self.title.clone(), theme.paper, None, false))
     }
@@ -329,7 +328,7 @@ impl TopBar {
                     .cursor_pointer()
                     .text_sm()
                     .text_color(if tab.active { theme.text } else { theme.muted })
-                    .when(tab.active, |this| this.bg(theme.paper).shadow_sm())
+                    .when(tab.active, |this| this.bg(theme.paper))
                     .when(!tab.active, |this| this.hover(|this| this.bg(theme.hover)))
                     .opacity(if tab.hidden { 0. } else { tab.opacity })
                     .child(title(

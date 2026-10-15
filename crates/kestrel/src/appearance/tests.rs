@@ -1,35 +1,6 @@
 use super::*;
 
 #[test]
-fn accessibility_preferences_disable_translucency() {
-    for appearance in [WindowAppearance::Light, WindowAppearance::Dark] {
-        let normal = Theme::resolve(appearance, Preferences::default(), true);
-        if cfg!(target_os = "macos") {
-            assert_eq!(normal.background, WindowBackgroundAppearance::Blurred);
-            assert!(normal.shell.a < 1.);
-        } else {
-            assert_eq!(normal.background, WindowBackgroundAppearance::Opaque);
-            assert_eq!(normal.shell.a, 1.);
-        }
-
-        for (reduce_transparency, increase_contrast) in [(true, false), (false, true), (true, true)]
-        {
-            let theme = Theme::resolve(
-                appearance,
-                Preferences {
-                    reduce_transparency,
-                    increase_contrast,
-                    ..Preferences::default()
-                },
-                true,
-            );
-            assert_eq!(theme.background, WindowBackgroundAppearance::Opaque);
-            assert_eq!(theme.shell.a, 1.);
-        }
-    }
-}
-
-#[test]
 fn legible_accents_are_not_adjusted() {
     let accent = rgb(0x0000ff).into();
     let background = rgb(0xffffff).into();

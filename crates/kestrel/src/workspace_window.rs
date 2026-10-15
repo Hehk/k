@@ -63,17 +63,12 @@ impl Kestrel {
         let top_bar = cx.new(|cx| TopBar::for_workspace(tabs, active, window, cx));
         let focus = cx.focus_handle();
         window.focus(&focus);
-        window.set_background_appearance(Theme::get(window, cx).background);
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, window, cx| {
                 appearance::refresh(cx);
-                window.set_background_appearance(Theme::get(window, cx).background);
                 window.refresh();
             }),
-            cx.observe_global_in::<Preferences>(window, |_, window, cx| {
-                window.set_background_appearance(Theme::get(window, cx).background);
-                window.refresh();
-            }),
+            cx.observe_global_in::<Preferences>(window, |_, window, _| window.refresh()),
             cx.subscribe_in(&top_bar, window, Self::handle_window_command),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 if this.workspace.read(cx).state().window(this.id).is_err() {

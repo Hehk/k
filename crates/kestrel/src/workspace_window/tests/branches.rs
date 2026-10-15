@@ -144,10 +144,6 @@ fn appearance_preferences_preserve_the_loaded_review_and_open_base_picker(cx: &m
         .unwrap();
     for preferences in [
         Preferences {
-            reduce_transparency: true,
-            ..Preferences::default()
-        },
-        Preferences {
             increase_contrast: true,
             ..Preferences::default()
         },
