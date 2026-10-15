@@ -243,6 +243,11 @@ impl FileLabel {
 }
 
 impl ComparisonView {
+    #[cfg(test)]
+    pub fn freshness(&self) -> Option<bool> {
+        self.review.data().map(|data| data.fresh)
+    }
+
     pub fn new(repository: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let workspace = repository.read(cx).workspace();
         let subscriptions = vec![

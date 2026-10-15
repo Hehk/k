@@ -338,6 +338,57 @@ fn background_completion_waits_for_window_activation_even_if_its_tab_is_selected
 }
 
 #[gpui::test]
+fn load_latest_stays_fresh_after_back_and_forward_without_refreshing_the_branch_list(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch:refs/heads/topic");
+    let latest = fixture.commit(
+        "refs/heads/topic",
+        Some(fixture.topic),
+        500,
+        "new content\n",
+    );
+    let freshness = |cx: &mut VisualTestContext| {
+        handle
+            .update(cx, |root, _, cx| {
+                root.repository
+                    .data()
+                    .unwrap()
+                    .read(cx)
+                    .comparison_freshness(cx)
+            })
+            .unwrap()
+    };
+    click(cx, "latest-review");
+    assert_eq!(freshness(cx), Some(true));
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(freshness(cx), Some(false));
+    cx.simulate_keystrokes("cmd-]");
+    redraw(cx);
+    workspace.read_with(cx, |workspace, _| {
+        let comparison = workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .route
+            .review()
+            .unwrap()
+            .active_review()
+            .unwrap()
+            .comparison
+            .as_ref()
+            .unwrap();
+        assert_eq!(comparison.commits.new.to_string(), latest.to_string());
+    });
+    assert_eq!(freshness(cx), Some(true));
+}
+
+#[gpui::test]
 fn restoring_windows_keeps_the_last_used_review_for_new_tabs(cx: &mut TestAppContext) {
     use kestrel::{
         state::{AppState, BaseSelection, Browsing, ComparisonChange},
