@@ -11,7 +11,9 @@ use gpui::{
 use kestrel::{
     state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
     storage::{self, Store},
-    viewing_history::{Foreground, ViewChange, ViewingHistory, ViewingId},
+    viewing_history::{
+        Foreground, Record, ViewChange, ViewingHistory, ViewingId, storage as history_storage,
+    },
 };
 
 use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
@@ -26,16 +28,24 @@ impl Global for Session {}
 
 pub struct LoadedWorkspace {
     state: AppState,
+    viewing_history: ViewingHistory,
     writer: Option<Writer>,
+    history_writer: Option<HistoryWriter>,
     notice: Option<String>,
 }
 
 impl LoadedWorkspace {
     pub fn load(store: Result<Store, storage::Error>) -> Self {
+        let history_path = store
+            .as_ref()
+            .ok()
+            .map(|store| store.path().with_extension("history.bin"));
         let result = store.and_then(|mut store| {
             let loaded = store.load()?;
             Ok(Self {
                 state: loaded.state,
+                viewing_history: ViewingHistory::default(),
+                history_writer: None,
                 writer: Some(Writer {
                     store,
                     revision: 0,
@@ -50,13 +60,40 @@ impl LoadedWorkspace {
                 }),
             })
         });
-        result.unwrap_or_else(|error| Self {
+        let mut loaded = result.unwrap_or_else(|error| Self {
             state: AppState::default(),
+            viewing_history: ViewingHistory::default(),
             writer: None,
+            history_writer: None,
             notice: Some(format!(
-                "Saved state could not be loaded: {error}. Saving is disabled; restart to retry."
+                "Saved state could not be loaded: {error}. Workspace saving is disabled; restart to retry."
             )),
-        })
+        });
+        // Workspace first, then reconcile the independently saved log by repository identity.
+        // Either file can be newer or unavailable; neither load requires a cross-file transaction.
+        if let Some(path) = history_path {
+            let mut store = history_storage::Store::new(path);
+            match store.load(&mut loaded.state) {
+                Ok(history) => {
+                    loaded.viewing_history = history.history;
+                    loaded.history_writer = Some(HistoryWriter { store, revision: 0, closed: false });
+                    if let Some(recovery) = history.recovery {
+                        loaded.add_notice(format!("Viewing history could not be restored: {}. Original preserved at {}.", recovery.reason, recovery.backup.display()));
+                    }
+                }
+                Err(error) => loaded.add_notice(format!("Viewing history could not be loaded: {error}. History saving is disabled; restart to retry.")),
+            }
+        }
+        loaded
+    }
+
+    fn add_notice(&mut self, message: String) {
+        if let Some(notice) = &mut self.notice {
+            notice.push('\n');
+            notice.push_str(&message);
+        } else {
+            self.notice = Some(message);
+        }
     }
 }
 
@@ -76,6 +113,23 @@ impl Writer {
     }
 }
 
+struct HistoryWriter {
+    store: history_storage::Store,
+    revision: u64,
+    closed: bool,
+}
+
+impl HistoryWriter {
+    fn save(&mut self, revision: u64, records: &[Record]) -> Result<(), history_storage::Error> {
+        if self.closed || revision < self.revision {
+            return Ok(());
+        }
+        // Fence on attempted writes, including failures, just like the workspace writer.
+        self.revision = revision;
+        self.store.save(records)
+    }
+}
+
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "Consumed by the later history UI layer")
@@ -89,6 +143,7 @@ pub struct Workspace {
     state: AppState,
     viewing_history: ViewingHistory,
     writer: Option<Arc<Mutex<Writer>>>,
+    history_writer: Option<Arc<Mutex<HistoryWriter>>>,
     revision: u64,
     save_task: Option<Task<()>>,
     save_error: Option<String>,
@@ -126,8 +181,11 @@ impl Workspace {
         });
         Self {
             state: loaded.state,
-            viewing_history: ViewingHistory::default(),
+            viewing_history: loaded.viewing_history,
             writer: loaded.writer.map(|writer| Arc::new(Mutex::new(writer))),
+            history_writer: loaded
+                .history_writer
+                .map(|writer| Arc::new(Mutex::new(writer))),
             revision: 0,
             save_task: None,
             save_error: None,
@@ -202,15 +260,15 @@ impl Workspace {
         target: OpenViewIn,
         cx: &mut Context<Self>,
     ) -> Result<TabId, StateError> {
-        let snapshot = self
+        let viewed = self
             .viewing_history
             .get(id)
             .ok_or(StateError("unknown viewing record"))?
             .viewed
-            .snapshot
             .clone();
         self.edit(
             |state| {
+                let snapshot = viewed.snapshot_for(state)?;
                 let tab = match target {
                     OpenViewIn::Tab(tab) => tab,
                     OpenViewIn::NewTab(window) => state.new_tab(window)?,
@@ -268,10 +326,7 @@ impl Workspace {
             }
         });
         self.viewing_history.retain_live_bindings(&state);
-        if self.state == state {
-            if viewed {
-                cx.notify();
-            }
+        if self.state == state && !viewed {
             return;
         }
         self.closed.extend(Closed::removed(&self.state, &state));
@@ -390,10 +445,15 @@ impl Workspace {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let Some(writer) = self.writer.clone() else {
+        let writer = self.writer.clone();
+        let history_writer = self.history_writer.clone();
+        if writer.is_none() && history_writer.is_none() {
             return;
-        };
+        }
         let state = self.state.clone();
+        // TODO: Whole-log cloning on the UI thread grows with history, even for debounced saves.
+        // Measure this separately from background encoding before introducing incremental storage.
+        let records = self.viewing_history.records().to_vec();
         let revision = self.revision;
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -402,10 +462,38 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut writer = writer.lock().map_err(|error| error.to_string())?;
-                    writer
-                        .save(revision, &state)
-                        .map_err(|error| error.to_string())
+                    let mut errors = Vec::new();
+                    // Independent files, not an atomic pair. Always attempt both writes, even
+                    // when one fails. Per-writer revision fences reject stale queued snapshots.
+                    if let Some(writer) = writer {
+                        let result = writer.lock().map_err(|error| error.to_string()).and_then(
+                            |mut writer| {
+                                writer
+                                    .save(revision, &state)
+                                    .map_err(|error| error.to_string())
+                            },
+                        );
+                        if let Err(error) = result {
+                            errors.push(format!("Workspace: {error}"));
+                        }
+                    }
+                    if let Some(writer) = history_writer {
+                        let result = writer.lock().map_err(|error| error.to_string()).and_then(
+                            |mut writer| {
+                                writer
+                                    .save(revision, &records)
+                                    .map_err(|error| error.to_string())
+                            },
+                        );
+                        if let Err(error) = result {
+                            errors.push(format!("Viewing history: {error}"));
+                        }
+                    }
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(errors.join("\n"))
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -422,17 +510,26 @@ impl Workspace {
         self.save_task.take();
         if let Some(writer) = &self.writer {
             // GPUI allows only 100 ms for async quit hooks. Finish this write before teardown.
-            let mut writer = match writer.lock() {
-                Ok(writer) => writer,
-                Err(error) => {
-                    eprintln!("Could not save workspace on quit: {error}");
-                    return;
+            match writer.lock() {
+                Ok(mut writer) => {
+                    if let Err(error) = writer.save(self.revision, &self.state) {
+                        eprintln!("Could not save workspace on quit: {error}");
+                    }
+                    writer.closed = true;
                 }
-            };
-            if let Err(error) = writer.save(self.revision, &self.state) {
-                eprintln!("Could not save workspace on quit: {error}");
+                Err(error) => eprintln!("Could not save workspace on quit: {error}"),
             }
-            writer.closed = true;
+        }
+        if let Some(writer) = &self.history_writer {
+            match writer.lock() {
+                Ok(mut writer) => {
+                    if let Err(error) = writer.save(self.revision, self.viewing_history.records()) {
+                        eprintln!("Could not save viewing history on quit: {error}");
+                    }
+                    writer.closed = true;
+                }
+                Err(error) => eprintln!("Could not save viewing history on quit: {error}"),
+            }
         }
     }
 }

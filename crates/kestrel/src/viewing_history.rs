@@ -1,19 +1,61 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
+    git::RepositoryInfo,
     review::{Comparison, RefName},
-    state::{AppState, BaseSelection, Destination, ProjectId, Snapshot, TabId, VisitId, WindowId},
+    state::{
+        AppState, BaseSelection, Destination, Project, ProjectId, Snapshot, StateError, TabId,
+        VisitId, WindowId,
+    },
 };
 
 #[cfg(test)]
 mod tests;
 
+pub mod storage;
+
 pub const RECENT_LIMIT: usize = 10;
+
+/// Saved independently of the workspace's numeric project IDs and repository availability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryIdentity {
+    #[serde(with = "crate::state::local_path")]
+    pub directory: PathBuf,
+    #[serde(with = "crate::state::local_path")]
+    pub common_dir: PathBuf,
+}
+
+impl From<&Project> for RepositoryIdentity {
+    fn from(project: &Project) -> Self {
+        Self {
+            directory: project.directory.clone(),
+            common_dir: project.common_dir.clone(),
+        }
+    }
+}
+
+impl RepositoryIdentity {
+    fn register(&self, state: &mut AppState) -> Result<ProjectId, StateError> {
+        if !self.directory.is_absolute() || !self.common_dir.is_absolute() {
+            return Err(StateError("history repository paths must be absolute"));
+        }
+        state.register_project(&RepositoryInfo {
+            directory: self.directory.clone(),
+            common_dir: self.common_dir.clone(),
+            current_branch: None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ViewingId(pub u64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Labels {
     pub repository: String,
     pub directory: String,
@@ -24,8 +66,24 @@ pub struct Labels {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Viewed {
+    pub repository: RepositoryIdentity,
     pub snapshot: Snapshot,
     pub labels: Labels,
+}
+
+impl Viewed {
+    /// Reconcile again on opening: replacing workspace state must not alias an old numeric ID.
+    pub fn snapshot_for(&self, state: &mut AppState) -> Result<Snapshot, StateError> {
+        let mut snapshot = self.snapshot.clone();
+        let project = self.repository.register(state)?;
+        match &mut snapshot.destination {
+            Destination::Branches(id) | Destination::Comparison { project: id, .. } => {
+                *id = project
+            }
+            Destination::Home => return Err(StateError("utility pages are not viewing records")),
+        }
+        Ok(snapshot)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +140,8 @@ struct Binding {
     event: Option<ViewingId>,
 }
 
-/// In-memory viewing records, separate from workspace snapshots and closed-container recovery.
+/// Viewing records, separate from workspace snapshots and closed-container recovery.
+/// Runtime bindings are deliberately not restored: startup never replays viewing events.
 #[derive(Default)]
 pub struct ViewingHistory {
     records: Vec<Record>,
@@ -191,9 +250,9 @@ impl ViewingHistory {
 // This key belongs to the projection, not the stored record schema.
 #[derive(PartialEq, Eq, Hash)]
 enum RecentKey {
-    Branches(ProjectId),
+    Branches(PathBuf),
     Comparison {
-        project: ProjectId,
+        repository: PathBuf,
         branch: RefName,
         base: Option<RefName>,
         pinned: Option<Comparison>,
@@ -211,14 +270,16 @@ fn recent<'a>(
         .filter(move |record| {
             let key = match &record.viewed.snapshot.destination {
                 Destination::Home => return false,
-                Destination::Branches(project) => RecentKey::Branches(*project),
+                Destination::Branches(_) => {
+                    RecentKey::Branches(record.viewed.repository.common_dir.clone())
+                }
                 Destination::Comparison {
-                    project,
                     branch,
                     base,
                     comparison,
+                    ..
                 } => RecentKey::Comparison {
-                    project: *project,
+                    repository: record.viewed.repository.common_dir.clone(),
                     branch: branch.clone(),
                     base: comparison
                         .as_ref()

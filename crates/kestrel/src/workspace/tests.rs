@@ -5,6 +5,7 @@ use kestrel::{git::RepositoryInfo, review::RefName};
 
 use super::*;
 
+mod persistence;
 mod viewing;
 
 fn project(state: &mut AppState, name: &str) -> kestrel::state::ProjectId {
@@ -193,7 +194,12 @@ fn failed_startup_load_disables_writes_without_losing_the_original() {
     let dir = tempfile::tempdir().unwrap();
     let loaded = LoadedWorkspace::load(Ok(Store::new(dir.path().to_owned())));
     assert!(loaded.writer.is_none());
-    assert!(loaded.notice.unwrap().contains("Saving is disabled"));
+    assert!(
+        loaded
+            .notice
+            .unwrap()
+            .contains("Workspace saving is disabled")
+    );
     assert!(dir.path().is_dir());
 }
 

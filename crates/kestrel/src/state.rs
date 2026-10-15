@@ -699,7 +699,7 @@ impl AppState {
     }
 }
 
-mod local_path {
+pub(crate) mod local_path {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
     use std::{
         ffi::OsString,

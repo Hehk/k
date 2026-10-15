@@ -44,6 +44,14 @@ pub struct Visit {
 }
 
 impl Snapshot {
+    pub(crate) fn check(&self) -> Result<(), StateError> {
+        self.view.browsing.check_paths()?;
+        if let Some(review) = self.restore(ReviewContext::default()).review() {
+            review.check_loaded()?;
+        }
+        Ok(())
+    }
+
     pub fn capture(route: &Route) -> Result<Self, StateError> {
         match route {
             Route::Home => Ok(Self {

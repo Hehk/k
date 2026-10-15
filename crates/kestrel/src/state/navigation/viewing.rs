@@ -169,6 +169,13 @@ impl AppState {
                 .as_ref()
                 .map(|file| file.label()),
         };
-        Ok((source, Some(Viewed { snapshot, labels })))
+        Ok((
+            source,
+            Some(Viewed {
+                repository: project.into(),
+                snapshot,
+                labels,
+            }),
+        ))
     }
 }

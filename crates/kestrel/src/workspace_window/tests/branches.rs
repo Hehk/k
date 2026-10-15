@@ -210,6 +210,92 @@ fn diff_scroll_is_saved_and_restored_after_navigation_and_restart(cx: &mut TestA
 }
 
 #[gpui::test]
+fn persisted_global_history_reopens_a_closed_source_after_restart(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    fixture.commit(
+        "refs/heads/topic",
+        Some(fixture.topic),
+        500,
+        &"added line\n".repeat(5000),
+    );
+    let (workspace, handle) = fixture.start(cx);
+    let source = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch:refs/heads/topic");
+    let position = cx.debug_bounds("diff-line-1").unwrap().center();
+    scroll(cx, position, 1100.);
+    let records = workspace.read_with(cx, |workspace, _| {
+        workspace.viewing_history().records().to_vec()
+    });
+    let saved = records.last().unwrap();
+    assert_eq!(saved.viewed.snapshot.view.browsing.first_visible_line, 50);
+    let top = cx.debug_bounds("diff-line-51").unwrap().top();
+    workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    let window = state.windows()[0].id;
+                    state.new_tab(window)?;
+                    state.close_tab(source);
+                    Ok(())
+                },
+                cx,
+            )
+            .unwrap()
+    });
+    redraw(cx);
+    cx.quit();
+
+    let reloaded = shared(cx, fixture.dir.path().join("state.json"));
+    let window = reloaded.read_with(cx, |workspace, _| {
+        assert!(workspace.state().tab(source).is_err());
+        assert_eq!(workspace.viewing_history().records(), records);
+        workspace.state().windows()[0].id
+    });
+    let reopened = cx.cx.update(|cx| {
+        cx.set_global(crate::workspace::Session(reloaded.clone()));
+        Kestrel::open(reloaded.clone(), window, cx).unwrap()
+    });
+    let cx = &mut VisualTestContext::from_window(reopened.into(), cx);
+    cx.update(|window, _| window.activate_window());
+    redraw(cx);
+    reloaded.update(cx, |workspace, cx| {
+        assert_eq!(workspace.viewing_history().records(), records);
+        workspace
+            .open_view(saved.id, crate::workspace::OpenViewIn::NewTab(window), cx)
+            .unwrap();
+    });
+    redraw(cx);
+    reloaded.read_with(cx, |workspace, _| {
+        assert_eq!(
+            &workspace.viewing_history().records()[..records.len()],
+            records
+        );
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 1
+        );
+        let tab = workspace
+            .state()
+            .window(window)
+            .unwrap()
+            .active_tab
+            .unwrap();
+        assert_eq!(
+            workspace
+                .state()
+                .tab(tab)
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .snapshot,
+            saved.viewed.snapshot
+        );
+    });
+    assert_eq!(cx.debug_bounds("diff-line-51").unwrap().top(), top);
+}
+
+#[gpui::test]
 fn branch_list_scroll_returns_with_the_visit(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     for index in 0..100 {

@@ -72,12 +72,13 @@ fn viewing_decisions_commit_atomically_and_are_not_in_the_workspace_snapshot(
     });
     reloaded.update(cx, |workspace, cx| {
         assert_eq!(workspace.state(), &state);
-        assert!(workspace.viewing_history().records().is_empty());
+        let restored = workspace.viewing_history().records().to_vec();
+        assert_eq!(restored.len(), 1);
         workspace
             .edit(|state| state.focus_window(window), cx)
             .unwrap();
         workspace.navigate(tab, Navigation::SelectTab, cx).unwrap();
-        assert!(workspace.viewing_history().records().is_empty());
+        assert_eq!(workspace.viewing_history().records(), restored);
     });
 }
 
