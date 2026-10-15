@@ -169,6 +169,26 @@ fn rows_have_fixed_width_for_missing_small_and_large_values() {
 }
 
 #[test]
+fn panel_rows_are_left_padded_to_the_widest_row() {
+    let metrics = Summary::default().label();
+    for (branch, expected) in [
+        (
+            "main",
+            "      branch: main\nfps:             -\nrender/s:        -",
+        ),
+        (
+            "branch-info",
+            "branch: branch-info\n fps:             -\n render/s:        -",
+        ),
+    ] {
+        assert_eq!(
+            right_align_rows(&format!("branch: {branch}\n{metrics}")).as_ref(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn timing_covers_the_enclosing_draw_and_records_only_when_it_finishes() {
     let _subscriber = tracing::subscriber::set_default(timing::subscriber());
     let samples = SharedSamples::default();

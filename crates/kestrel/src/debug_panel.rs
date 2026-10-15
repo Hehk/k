@@ -58,6 +58,20 @@ fn metric_row(key: &str, value: Option<f64>, precision: usize) -> String {
     format!("{key:<KEY_WIDTH$}{value:>VALUE_WIDTH$}")
 }
 
+fn right_align_rows(label: &str) -> SharedString {
+    let width = label
+        .lines()
+        .map(|row| row.chars().count())
+        .max()
+        .unwrap_or(0);
+    label
+        .lines()
+        .map(|row| format!("{row:>width$}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into()
+}
+
 impl Samples {
     fn record(&mut self, completed: Instant, duration: Duration) {
         while self.frames.front().is_some_and(|(time, _)| {
@@ -146,7 +160,11 @@ impl Render for DebugPanel {
                 "monospace"
             })
             .whitespace_nowrap()
-            .child(self.label.clone())
+            .child(right_align_rows(&format!(
+                "branch: {}\n{}",
+                env!("KESTREL_BRANCH"),
+                self.label
+            )))
     }
 }
 
