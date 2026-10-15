@@ -12,10 +12,11 @@ mod tests;
 
 use std::time::Instant;
 
+use crate::appearance::Theme;
 use gpui::{
     Context, DispatchPhase, DragMoveEvent, EventEmitter, FocusHandle, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, WeakFocusHandle, Window,
-    WindowControlArea, canvas, div, prelude::*, px, rgb,
+    WindowControlArea, canvas, div, prelude::*, px,
 };
 pub use model::TITLEBAR_HEIGHT;
 use model::{
@@ -35,7 +36,8 @@ struct DragPreview {
 }
 
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         div()
             .w(px(self.width))
             .h(px(TAB_HEIGHT))
@@ -44,10 +46,11 @@ impl Render for DragPreview {
             .pl(px(TITLE_INSET))
             .pr(px(CLOSE_BUTTON_SPACE))
             .rounded_full()
-            .bg(rgb(0xffffff))
+            .bg(theme.paper)
+            .text_color(theme.text)
             .shadow_md()
             .text_sm()
-            .child(title(self.title.clone(), gpui::white(), None, false))
+            .child(title(self.title.clone(), theme.paper, None, false))
     }
 }
 
@@ -237,7 +240,7 @@ impl TopBar {
         );
     }
 
-    fn render_add_button(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_add_button(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         div()
             .id("new-tab")
             .debug_selector(|| "new-tab".into())
@@ -247,15 +250,16 @@ impl TopBar {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_color(rgb(0x55575c))
-            .hover(|this| this.bg(gpui::white().opacity(0.7)))
+            .text_color(theme.muted)
+            .hover(|this| this.bg(theme.hover))
+            .active(|this| this.bg(theme.pressed))
             .child("+")
             .tooltip(tooltip("New tab (⌘T)"))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, window, cx| this.dispatch(Msg::Add, window, cx)))
     }
 
-    fn render_close_button(&self, id: u64, cx: &Context<Self>) -> impl IntoElement {
+    fn render_close_button(&self, id: u64, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         div()
             .id(("close-tab", id))
             .debug_selector(|| format!("close-tab-{id}"))
@@ -269,8 +273,9 @@ impl TopBar {
             .rounded_full()
             .cursor_pointer()
             .text_sm()
-            .text_color(rgb(0x686a70))
-            .hover(|this| this.bg(rgb(0xd5d6da)).text_color(rgb(0x25262a)))
+            .text_color(theme.muted)
+            .hover(|this| this.bg(theme.hover).text_color(theme.text))
+            .active(|this| this.bg(theme.pressed))
             .child("×")
             .tooltip(tooltip(
                 if self.active_tab().is_some_and(|tab| tab.id == id) {
@@ -291,6 +296,7 @@ impl TopBar {
         tab: &TabView<'_>,
         width: f32,
         interactive: bool,
+        theme: Theme,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let id = tab.tab.id;
@@ -322,30 +328,22 @@ impl TopBar {
                     .rounded_full()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(if tab.active {
-                        rgb(0x25262a)
-                    } else {
-                        rgb(0x686a70)
-                    })
-                    .when(tab.active, |this| this.bg(rgb(0xffffff)).shadow_sm())
-                    .when(!tab.active, |this| {
-                        this.hover(|this| this.bg(gpui::white().opacity(0.55)))
-                    })
+                    .text_color(if tab.active { theme.text } else { theme.muted })
+                    .when(tab.active, |this| this.bg(theme.paper).shadow_sm())
+                    .when(!tab.active, |this| this.hover(|this| this.bg(theme.hover)))
                     .opacity(if tab.hidden { 0. } else { tab.opacity })
                     .child(title(
                         tab.tab.title.clone(),
                         if tab.active {
-                            gpui::white()
+                            theme.paper
                         } else {
-                            rgb(0xe5e6e9).into()
+                            theme.control
                         },
-                        (!tab.active).then(|| {
-                            gpui::Hsla::from(rgb(0xe5e6e9)).blend(gpui::white().opacity(0.55))
-                        }),
+                        (!tab.active).then_some(theme.hover),
                         false,
                     ))
                     .when(tab.close_visible, |this| {
-                        this.child(self.render_close_button(id, cx))
+                        this.child(self.render_close_button(id, theme, cx))
                     }),
             )
             .on_hover(cx.listener(move |this, hovered, window, cx| {
@@ -395,14 +393,16 @@ impl TopBar {
 }
 
 impl Render for TopBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::commands::refresh_later(cx);
+        let theme = Theme::get(window, cx);
         let view = self.model.view();
         let geometry = self.model.geometry();
         let entity = cx.entity().downgrade();
         let scroll = self.scroll.clone();
 
         div()
+            .text_color(theme.text)
             .relative()
             .h(px(TITLEBAR_HEIGHT))
             .w_full()
@@ -516,16 +516,11 @@ impl Render for TopBar {
                                 .items_center()
                                 .px(px(CLOSE_BUTTON_SPACE))
                                 .text_sm()
-                                .text_color(rgb(0x25262a))
-                                .child(title(
-                                    tab.tab.title.clone(),
-                                    rgb(0xf1f2f4).into(),
-                                    None,
-                                    true,
-                                ))
+                                .text_color(theme.text)
+                                .child(title(tab.tab.title.clone(), theme.shell, None, true))
                                 .opacity(if tab.hidden { 0. } else { 1. })
                                 .when(tab.close_visible, |this| {
-                                    this.child(self.render_close_button(tab.tab.id, cx))
+                                    this.child(self.render_close_button(tab.tab.id, theme, cx))
                                 }),
                         )
                     })
@@ -541,11 +536,17 @@ impl Render for TopBar {
                                 .gap(px(TAB_GAP))
                                 .px(px(PILL_PADDING))
                                 .rounded_full()
-                                .bg(rgb(0xe5e6e9))
+                                .bg(theme.control)
                                 .overflow_x_scroll()
                                 .track_scroll(&self.scroll)
                                 .children(view.tabs.iter().map(|tab| {
-                                    self.render_tab(tab, view.layout.tab_width, view.draggable, cx)
+                                    self.render_tab(
+                                        tab,
+                                        view.layout.tab_width,
+                                        view.draggable,
+                                        theme,
+                                        cx,
+                                    )
                                 })),
                         )
                     }),
@@ -562,8 +563,8 @@ impl Render for TopBar {
                     .window_control_area(WindowControlArea::Drag)
                     .child(
                         div()
-                            .opacity(if view.interactive { 1. } else { 0.5 })
-                            .child(self.render_add_button(cx)),
+                            .when(!view.interactive, |this| this.text_color(theme.disabled))
+                            .child(self.render_add_button(theme, cx)),
                     ),
             )
     }

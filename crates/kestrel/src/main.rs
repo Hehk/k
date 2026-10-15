@@ -1,3 +1,4 @@
+mod appearance;
 mod branch_view;
 mod commands;
 mod comparison_view;
@@ -82,6 +83,7 @@ fn main() {
         }
     });
     app.run(move |cx: &mut App| {
+        appearance::install(cx);
         let workspace = cx.new(|cx| Workspace::new(loaded, cx));
         cx.set_global(Session(workspace.clone()));
         commands::install(cx);

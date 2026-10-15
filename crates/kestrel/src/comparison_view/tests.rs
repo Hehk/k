@@ -51,22 +51,37 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
                 row.old.as_ref(),
                 row.new.as_ref(),
                 row.text.as_ref(),
-                row.color,
+                row.tone,
             )
         })
         .collect::<Vec<_>>();
     assert_eq!(
         actual,
         vec![
-            ("", "", "@@ -10,2 +20,2 @@", 0xeaf0fa),
-            ("10", "20", " keep λ  ", 0xffffff),
-            ("11", "", "-removed", 0xfbe5e5),
-            ("", "21", "+added", 0xe3f4e8),
-            ("", "", "\\ No newline at end of file (Old)", 0xf3f3f3),
-            ("", "", "\\ No newline at end of file (New)", 0xf3f3f3),
-            ("", "", "\\ No newline at end of file (Both)", 0xf3f3f3),
-            ("", "", header.as_str(), 0xeaf0fa),
-            ("", "100", "+tail", 0xe3f4e8),
+            ("", "", "@@ -10,2 +20,2 @@", DiffTone::Hunk),
+            ("10", "20", " keep λ  ", DiffTone::Context),
+            ("11", "", "-removed", DiffTone::Deleted),
+            ("", "21", "+added", DiffTone::Added),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (Old)",
+                DiffTone::Metadata
+            ),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (New)",
+                DiffTone::Metadata
+            ),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (Both)",
+                DiffTone::Metadata
+            ),
+            ("", "", header.as_str(), DiffTone::Hunk),
+            ("", "100", "+tail", DiffTone::Added),
         ]
     );
     assert_eq!(widest, Some(7));

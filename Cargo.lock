@@ -2874,6 +2874,7 @@ dependencies = [
 name = "kestrel"
 version = "0.1.0"
 dependencies = [
+ "block",
  "dirs 5.0.1",
  "git2",
  "gpui",

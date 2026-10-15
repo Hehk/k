@@ -3,7 +3,7 @@
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, Window, deferred, div, prelude::*,
-    px, rgb, uniform_list,
+    px, uniform_list,
 };
 use kestrel::{
     git::Snapshot,
@@ -12,6 +12,7 @@ use kestrel::{
 };
 
 use crate::{
+    appearance::Theme,
     controls::control,
     repository_model::{Load, RepositoryModel, branch_label},
     text_input::{InputEvent, TextInput},
@@ -158,7 +159,7 @@ impl BranchView {
         self.synchronize(cx);
     }
 
-    fn sort_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn sort_menu(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         div()
             .relative()
             .child(
@@ -168,6 +169,7 @@ impl BranchView {
                         BranchSort::Newest => "Sort: Newest commit ▾",
                         BranchSort::Name => "Sort: Name (A–Z) ▾",
                     },
+                    theme,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.sort_open = !this.sort_open;
@@ -184,9 +186,9 @@ impl BranchView {
                             .right_0()
                             .w_56()
                             .occlude()
-                            .bg(rgb(0xffffff))
+                            .bg(theme.paper)
                             .border_1()
-                            .border_color(rgb(0xc8cbd2))
+                            .border_color(theme.border)
                             .rounded_md()
                             .shadow_md()
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -200,7 +202,7 @@ impl BranchView {
                                 ]
                                 .into_iter()
                                 .map(|(sort, id, label)| {
-                                    control(id, label).w_full().on_click(cx.listener(
+                                    control(id, label, theme).w_full().on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             this.sort_open = false;
                                             let filters = BranchList {
@@ -220,15 +222,16 @@ impl BranchView {
 }
 
 impl Render for BranchView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         let header = div()
             .flex()
             .gap_3()
             .items_center()
             .child(div().flex_1().min_w_0().child(self.search.clone()))
-            .child(self.sort_menu(cx))
+            .child(self.sort_menu(theme, cx))
             .child(
-                control("refresh-branches", "Refresh local refs").on_click(cx.listener(
+                control("refresh-branches", "Refresh local refs", theme).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.repository
                             .update(cx, |repository, cx| repository.refresh(cx))
@@ -238,7 +241,7 @@ impl Render for BranchView {
         let body = match self.repository.read(cx).snapshot() {
             Load::Loading => div().child("Loading branches…").into_any_element(),
             Load::Failed(error) => div()
-                .text_color(rgb(0xaa3030))
+                .text_color(theme.error)
                 .child(error.clone())
                 .into_any_element(),
             Load::Ready(snapshot) if snapshot.branches.is_empty() => div()
@@ -250,7 +253,7 @@ impl Render for BranchView {
             Load::Ready(_) => uniform_list(
                 "branches",
                 self.visible.len(),
-                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     let repository = this.repository.read(cx);
                     let Load::Ready(snapshot) = repository.snapshot() else {
                         return Vec::new();
@@ -269,20 +272,20 @@ impl Render for BranchView {
                                 .items_center()
                                 .justify_between()
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0xf1f4fa)))
+                                .hover(|style| style.bg(theme.hover))
                                 .when(
                                     repository
                                         .route(cx)
                                         .and_then(Route::review)
                                         .and_then(|review| review.selected_branch.as_ref())
                                         == Some(&branch.name),
-                                    |row| row.bg(rgb(0xe7edf9)),
+                                    |row| row.bg(theme.selection),
                                 )
                                 .child(branch_label(branch))
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(0x777980))
+                                        .text_color(theme.muted)
                                         .child(branch.tip.to_string()[..8].to_owned()),
                                 )
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -298,13 +301,14 @@ impl Render for BranchView {
             .into_any_element(),
         };
         div()
+            .text_color(theme.text)
             .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
             .gap_3()
             .when_some(self.error.clone(), |panel, error| {
-                panel.child(div().text_color(rgb(0xaa3030)).child(error))
+                panel.child(div().text_color(theme.error).child(error))
             })
             .child(header)
             .child(body)

@@ -127,6 +127,54 @@ fn large_diffs_stay_virtualized_across_redraws(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn appearance_preferences_preserve_the_loaded_review_and_open_base_picker(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (workspace, handle) = fixture.start(cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch-search");
+    cx.simulate_input("topic");
+    click(cx, "branch:refs/heads/topic");
+    click(cx, "choose-base");
+    assert!(cx.debug_bounds("diff-line-1").is_some());
+    assert!(cx.debug_bounds("base:refs/heads/main").is_some());
+
+    let before = workspace.read_with(cx, |workspace, _| workspace.state().clone());
+    let view = handle
+        .read_with(cx, |root, _| root.repository_view.clone().unwrap())
+        .unwrap();
+    for preferences in [
+        Preferences {
+            reduce_transparency: true,
+            ..Preferences::default()
+        },
+        Preferences {
+            increase_contrast: true,
+            ..Preferences::default()
+        },
+        Preferences {
+            accent: gpui::rgb(0xff0000).into(),
+            ..Preferences::default()
+        },
+        Preferences::default(),
+    ] {
+        cx.update(|_, cx| cx.set_global(preferences));
+        redraw(cx);
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.state().clone()),
+            before,
+        );
+        assert_eq!(
+            handle
+                .read_with(cx, |root, _| root.repository_view.clone().unwrap())
+                .unwrap(),
+            view,
+        );
+        assert!(cx.debug_bounds("diff-line-1").is_some());
+        assert!(cx.debug_bounds("base:refs/heads/main").is_some());
+    }
+}
+
+#[gpui::test]
 fn branch_list_search_sort_and_comparison_navigation_use_the_real_ui(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let index_before = std::fs::read(fixture.git.path().join("index")).unwrap();
