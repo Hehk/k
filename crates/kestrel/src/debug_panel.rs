@@ -7,8 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 
+use crate::appearance::Theme;
 pub use timing::install;
 
 const DISPLAY_INTERVAL: Duration = Duration::from_millis(250);
@@ -119,7 +120,8 @@ impl DebugPanel {
 }
 
 impl Render for DebugPanel {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         // Associate the enclosing GPUI draw span with this window's samples.
         // The span, not this view's render method, measures the whole scene build.
         timing::attach(self.samples.clone());
@@ -128,13 +130,15 @@ impl Render for DebugPanel {
             .id("debug-panel")
             .debug_selector(|| "debug-panel".into())
             .absolute()
-            .bottom_2()
-            .right_2()
+            .bottom_4()
+            .right_4()
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(0x242830))
-            .text_color(rgb(0xe4e7ec))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.paper)
+            .text_color(theme.muted)
             .text_size(px(11.))
             .font_family(if cfg!(target_os = "macos") {
                 "Menlo"

@@ -7,9 +7,11 @@ use gpui::{
     Action, App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Pixels, Point, ShapedLine,
     SharedString, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, rgba, size,
+    prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::appearance::Theme;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = text_input, no_json)]
@@ -315,7 +317,8 @@ impl EntityInputHandler for TextInput {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         let id = self.id;
         let input = cx.entity();
         let paint_input = input.clone();
@@ -331,7 +334,10 @@ impl Render for TextInput {
             .px_2()
             .py_1()
             .border_1()
-            .border_color(rgb(0xc8cbd2))
+            .border_color(theme.input_border)
+            .focus(|style| style.border_color(theme.accent))
+            .bg(theme.paper)
+            .text_color(theme.text)
             .rounded_md()
             .overflow_hidden()
             .on_action(cx.listener(Self::edit))
@@ -372,7 +378,7 @@ impl Render for TextInput {
                             input.text.clone().into()
                         };
                         let color = if input.text.is_empty() {
-                            rgb(0x8a8d94).into()
+                            theme.muted
                         } else {
                             style.color
                         };
@@ -446,9 +452,9 @@ impl Render for TextInput {
                             window.paint_quad(fill(
                                 selection_bounds,
                                 if selected.is_empty() {
-                                    rgba(0x3366ccff)
+                                    theme.accent
                                 } else {
-                                    rgba(0x3366cc40)
+                                    theme.selection
                                 },
                             ));
                         }

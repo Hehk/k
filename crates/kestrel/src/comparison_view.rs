@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window, div, prelude::*, px,
-    rgb, uniform_list,
+    uniform_list,
 };
 use kestrel::{
     review::{
@@ -16,6 +16,7 @@ use kestrel::{
 };
 
 use crate::{
+    appearance::{DiffTone, Theme},
     controls::control,
     repository_model::{Load, RepositoryModel, branch_label, open},
 };
@@ -66,7 +67,7 @@ struct DiffRow {
     old: gpui::SharedString,
     new: gpui::SharedString,
     text: gpui::SharedString,
-    color: u32,
+    tone: DiffTone,
 }
 
 enum PreparedPatch {
@@ -89,10 +90,10 @@ impl PreparedPatch {
                 old: "".into(),
                 new: "".into(),
                 text: hunk.header.trim_end().to_owned().into(),
-                color: 0xeaf0fa,
+                tone: DiffTone::Hunk,
             });
             for line in hunk.lines {
-                let (old, new, text, color) = match line {
+                let (old, new, text, tone) = match line {
                     DiffLine::Context {
                         old_line,
                         new_line,
@@ -101,32 +102,32 @@ impl PreparedPatch {
                         old_line.to_string(),
                         new_line.to_string(),
                         format!(" {}", text.trim_end_matches(['\r', '\n'])),
-                        0xffffff,
+                        DiffTone::Context,
                     ),
                     DiffLine::Added { new_line, text } => (
                         String::new(),
                         new_line.to_string(),
                         format!("+{}", text.trim_end_matches(['\r', '\n'])),
-                        0xe3f4e8,
+                        DiffTone::Added,
                     ),
                     DiffLine::Deleted { old_line, text } => (
                         old_line.to_string(),
                         String::new(),
                         format!("-{}", text.trim_end_matches(['\r', '\n'])),
-                        0xfbe5e5,
+                        DiffTone::Deleted,
                     ),
                     DiffLine::NoNewline(side) => (
                         String::new(),
                         String::new(),
                         format!("\\ No newline at end of file ({side:?})"),
-                        0xf3f3f3,
+                        DiffTone::Metadata,
                     ),
                 };
                 rows.push(DiffRow {
                     old: old.into(),
                     new: new.into(),
                     text: text.into(),
-                    color,
+                    tone,
                 });
             }
         }
@@ -436,7 +437,7 @@ impl ComparisonView {
         cx.notify();
     }
 
-    fn base_picker(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn base_picker(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         let label = self
             .current_key(cx)
             .and_then(|key| {
@@ -452,19 +453,19 @@ impl ComparisonView {
                 div()
                     .flex()
                     .gap_2()
-                    .child(
-                        control("choose-base", label).on_click(cx.listener(|this, _, _, cx| {
+                    .child(control("choose-base", label, theme).on_click(cx.listener(
+                        |this, _, _, cx| {
                             this.base_open = !this.base_open;
                             cx.notify();
-                        })),
-                    )
+                        },
+                    )))
                     .child(
-                        control("refresh-review-refs", "Refresh local refs").on_click(cx.listener(
-                            |this, _, _, cx| {
+                        control("refresh-review-refs", "Refresh local refs", theme).on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.repository
                                     .update(cx, |repository, cx| repository.refresh(cx))
-                            },
-                        )),
+                            }),
+                        ),
                     ),
             )
             .when(self.base_open, |picker| {
@@ -472,7 +473,7 @@ impl ComparisonView {
                     Load::Ready(snapshot) => uniform_list(
                         "base-options",
                         snapshot.branches.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             let Load::Ready(snapshot) = this.repository.read(cx).snapshot() else {
                                 return Vec::new();
                             };
@@ -488,7 +489,7 @@ impl ComparisonView {
                                         .h(px(30.))
                                         .px_2()
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0xf1f4fa)))
+                                        .hover(|style| style.bg(theme.hover))
                                         .child(branch_label(branch))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.base_open = false;
@@ -508,30 +509,32 @@ impl ComparisonView {
 }
 
 impl Render for ComparisonView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         let mut panel = div()
+            .text_color(theme.text)
             .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
             .gap_3()
             .when_some(self.error.clone(), |panel, error| {
-                panel.child(div().text_color(rgb(0xaa3030)).child(error))
+                panel.child(div().text_color(theme.error).child(error))
             })
-            .child(self.base_picker(cx));
+            .child(self.base_picker(theme, cx));
         panel = match &self.review {
             ReviewStatus::ChooseBase => {
                 panel.child("Choose a comparison base; no unambiguous repository default is known.")
             }
             ReviewStatus::Loading => panel.child("Loading comparison…"),
             ReviewStatus::Failed(error) => panel
-                .child(div().text_color(rgb(0xaa3030)).child(error.clone()))
+                .child(div().text_color(theme.error).child(error.clone()))
                 .child(
-                    control("retry-review", "Retry pinned comparison")
+                    control("retry-review", "Retry pinned comparison", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.load_review(None, false, cx))),
                 )
                 .child(
-                    control("latest-review", "Load latest")
+                    control("latest-review", "Load latest", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.load_review(None, true, cx))),
                 ),
             ReviewStatus::Ready(data) => {
@@ -543,10 +546,10 @@ impl Render for ComparisonView {
                 panel.child(div().text_sm().child(label))
                     .child(div().flex().gap_3().items_center()
                         .when(!data.fresh, |row| row.child("Local refs have changed or disappeared. This comparison is pinned."))
-                        .child(control("latest-review", "Load latest").on_click(cx.listener(|this, _, _, cx| this.load_review(None, true, cx)))))
+                        .child(control("latest-review", "Load latest", theme).on_click(cx.listener(|this, _, _, cx| this.load_review(None, true, cx)))))
                     .when(data.changes.is_empty(), |panel| panel.child("No changed files."))
                     .when(!data.changes.is_empty(), |panel| panel.child(div().flex().flex_1().min_h_0().gap_3()
-                        .child(uniform_list("changed-files", data.changes.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        .child(uniform_list("changed-files", data.changes.len(), cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             let ReviewStatus::Ready(data) = &this.review else { return Vec::new(); };
                             range.map(|index| {
                                 let change = &data.changes[index];
@@ -556,11 +559,11 @@ impl Render for ComparisonView {
                                     _ => format!("{}  {}", match change { FileChange::Added {..} => "A", FileChange::Deleted {..} => "D", FileChange::TypeChanged {..} => "T", _ => "M" }, file.label()),
                                 };
                                 div().id(index).h(px(30.)).px_2().overflow_hidden().cursor_pointer()
-                                    .when(this.patch_key.as_ref() == Some(change), |row| row.bg(rgb(0xe7edf9)))
+                                    .when(this.patch_key.as_ref() == Some(change), |row| row.bg(theme.selection))
                                     .child(label).on_click(cx.listener(move |this, _, _, cx| this.select_file(file.clone(), cx)))
                             }).collect()
                         })).w(px(250.)).h_full())
-                        .child(div().flex_1().min_w_0().h_full().child(self.file_preview(cx)))))
+                        .child(div().flex_1().min_w_0().h_full().child(self.file_preview(theme, cx)))))
             }
         };
         panel.into_any_element()
@@ -568,7 +571,7 @@ impl Render for ComparisonView {
 }
 
 impl ComparisonView {
-    fn file_preview(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn file_preview(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -587,20 +590,22 @@ impl ComparisonView {
                         panel.child(div().text_sm().child(format!("Mode: {old} → {new}")))
                     })
             })
-            .child(div().flex_1().min_h_0().child(self.diff(cx)))
+            .child(div().flex_1().min_h_0().child(self.diff(theme, cx)))
     }
 
-    fn diff(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn diff(&self, theme: Theme, cx: &Context<Self>) -> gpui::AnyElement {
         match &self.patch {
             Load::Loading => div().child("Loading diff…").into_any_element(),
             Load::Failed(error) => div()
                 .child(error.clone())
-                .child(control("retry-patch", "Retry diff").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.patch_key = None;
-                        this.load_patch(cx);
-                    },
-                )))
+                .child(
+                    control("retry-patch", "Retry diff", theme).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.patch_key = None;
+                            this.load_patch(cx);
+                        },
+                    )),
+                )
                 .into_any_element(),
             Load::Ready(PreparedPatch::Unavailable(reason)) => {
                 use kestrel::review::PreviewUnavailable::*;
@@ -626,13 +631,13 @@ impl ComparisonView {
                                 old,
                                 new,
                                 text,
-                                color,
+                                tone,
                             } = &rows[index];
                             div()
                                 .debug_selector(move || format!("diff-line-{index}"))
                                 .h(px(22.))
                                 .flex()
-                                .bg(rgb(*color))
+                                .bg(theme.diff(*tone))
                                 .font_family(if cfg!(target_os = "macos") {
                                     "Menlo"
                                 } else {
@@ -643,14 +648,14 @@ impl ComparisonView {
                                     div()
                                         .w(px(48.))
                                         .flex_shrink_0()
-                                        .text_color(rgb(0x777980))
+                                        .text_color(theme.muted)
                                         .child(old.clone()),
                                 )
                                 .child(
                                     div()
                                         .w(px(48.))
                                         .flex_shrink_0()
-                                        .text_color(rgb(0x777980))
+                                        .text_color(theme.muted)
                                         .child(new.clone()),
                                 )
                                 .child(div().whitespace_nowrap().child(text.clone()))

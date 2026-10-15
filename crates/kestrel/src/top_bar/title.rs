@@ -47,7 +47,7 @@ pub(super) fn title(
                         );
                         if overflowing {
                             // Match the tab's hover surface, including its padding. Only the
-                            // title is masked; the close button and pill shadow stay intact.
+                            // title is masked; the close button and pill edges stay intact.
                             let tab_bounds = Bounds::new(
                                 bounds.origin - point(px(TITLE_INSET), px(0.)),
                                 size(

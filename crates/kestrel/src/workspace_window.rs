@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use gpui::{
     App, Context, Entity, FocusHandle, PathPromptOptions, Subscription, Task, Window, WindowBounds,
-    WindowHandle, div, prelude::*, px, rgb, size,
+    WindowHandle, div, prelude::*, px, size,
 };
 use kestrel::{
     git::{Repository, RepositoryInfo},
@@ -10,7 +10,9 @@ use kestrel::{
 };
 
 use crate::{
+    appearance::{self, Preferences, Theme},
     commands::{self, Command},
+    controls::{control as button, enabled_control},
     repository_view::RepositoryView,
     top_bar::{
         TabAction, TopBar,
@@ -62,6 +64,11 @@ impl Kestrel {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let subscriptions = vec![
+            cx.observe_window_appearance(window, |_, window, cx| {
+                appearance::refresh(cx);
+                window.refresh();
+            }),
+            cx.observe_global_in::<Preferences>(window, |_, window, _| window.refresh()),
             cx.subscribe_in(&top_bar, window, Self::handle_window_command),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 if this.workspace.read(cx).state().window(this.id).is_err() {
@@ -89,6 +96,7 @@ impl Kestrel {
             cx.observe_window_bounds(window, |_, _, cx| commands::refresh_later(cx)),
             cx.observe_window_activation(window, |this, window, cx| {
                 commands::refresh_later(cx);
+                window.refresh();
                 if window.is_window_active() {
                     let _ = this.workspace.update(cx, |workspace, cx| {
                         workspace.edit(|state| state.focus_window(this.id), cx)
@@ -313,17 +321,15 @@ impl Kestrel {
         id: &'static str,
         label: &'static str,
         command: Command,
+        theme: Theme,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let enabled = self.navigation_allowed(command, cx);
-        button(id, label)
-            .debug_selector(move || id.into())
-            .when(!enabled, |this| this.opacity(0.4).cursor_default())
-            .when(enabled, |this| {
-                this.on_click(move |_, window, cx| {
-                    window.dispatch_action(Box::new(command), cx);
-                })
+        enabled_control(id, label, enabled, theme).when(enabled, |this| {
+            this.on_click(move |_, window, cx| {
+                window.dispatch_action(Box::new(command), cx);
             })
+        })
     }
 
     fn open_saved(&mut self, project: ProjectId, cx: &mut Context<Self>) {
@@ -525,20 +531,10 @@ fn discover(path: PathBuf) -> Result<RepositoryInfo, String> {
         .map_err(|error| error.to_string())
 }
 
-fn button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(0xe7e9ee))
-        .cursor_pointer()
-        .child(label)
-}
-
 impl Render for Kestrel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         commands::refresh_later(cx);
+        let theme = Theme::get(window, cx);
         let workspace = self.workspace.read(cx);
         let tab = self.active_tab(cx);
         let project = tab
@@ -561,145 +557,150 @@ impl Render for Kestrel {
             .collect::<Vec<_>>();
         let notice = workspace.notice().map(str::to_owned);
         let save_error = workspace.save_error().map(str::to_owned);
-        let root = div()
-            .key_context("Workspace")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|this, action: &TabAction, window, cx| {
-                if !this.tab_action_allowed(action, cx) {
-                    return;
-                }
-                this.top_bar
-                    .update(cx, |bar, cx| bar.dispatch(action.message(), window, cx));
-            }))
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(0xf1f2f4))
-            .child(self.top_bar.clone())
-            .when_some(notice, |this, notice| {
-                this.child(div().p_2().text_sm().bg(rgb(0xffefc7)).child(notice))
-            })
-            .when_some(save_error, |this, error| {
-                this.child(
-                    div()
-                        .p_2()
-                        .flex()
-                        .gap_3()
-                        .text_sm()
-                        .bg(rgb(0xffefc7))
-                        .child(format!("Workspace is not saved: {error}"))
-                        .child(button("retry-save", "Retry").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.workspace
-                                    .update(cx, |workspace, cx| workspace.save(cx));
-                            },
-                        ))),
-                )
-            })
-            .child(
-                div()
-                    .id("content-frame")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .mx_2()
-                    .mb_2()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(0xe0e1e4))
-                    .bg(rgb(0xffffff))
-                    .child(
+        let root =
+            div()
+                .key_context("Workspace")
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|this, action: &TabAction, window, cx| {
+                    if !this.tab_action_allowed(action, cx) {
+                        return;
+                    }
+                    this.top_bar
+                        .update(cx, |bar, cx| bar.dispatch(action.message(), window, cx));
+                }))
+                .relative()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(theme.shell)
+                .text_color(theme.text)
+                .child(self.top_bar.clone())
+                .when_some(notice, |this, notice| {
+                    this.child(div().p_2().text_sm().bg(theme.warning).child(notice))
+                })
+                .when_some(save_error, |this, error| {
+                    this.child(
                         div()
+                            .p_2()
                             .flex()
-                            .gap_2()
-                            .child(self.navigation_button(
-                                "navigate-back",
-                                "Back",
-                                Command::Back,
-                                cx,
-                            ))
-                            .child(self.navigation_button(
-                                "navigate-forward",
-                                "Forward",
-                                Command::Forward,
-                                cx,
-                            )),
-                    )
-                    .child(div().text_lg().child(title))
-                    .when_some(directory.clone(), |this, directory| {
-                        this.child(div().text_sm().text_color(rgb(0x777980)).child(directory))
-                    })
-                    .when(directory.is_some(), |this| match &self.repository {
-                        RepositoryStatus::Loading => this.child("Opening repository…"),
-                        RepositoryStatus::Ready => this
-                            .when_some(self.repository_view.clone(), |this, view| {
-                                this.child(div().flex_1().min_h_0().child(view))
-                            }),
-                        RepositoryStatus::Unavailable(error) => this
-                            .child(
-                                div()
-                                    .text_color(rgb(0xaa3030))
-                                    .child(format!("Repository unavailable: {error}")),
-                            )
-                            .child(button("retry-repository", "Retry").on_click(cx.listener(
+                            .gap_3()
+                            .text_sm()
+                            .bg(theme.warning)
+                            .child(format!("Workspace is not saved: {error}"))
+                            .child(button("retry-save", "Retry", theme).on_click(cx.listener(
                                 |this, _, _, cx| {
-                                    this.selection = None;
-                                    this.load_project(cx);
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("close-tab", "Close tab").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.top_bar.update(cx, |bar, cx| {
-                                        bar.dispatch(Msg::CloseActive, window, cx)
-                                    });
+                                    this.workspace
+                                        .update(cx, |workspace, cx| workspace.save(cx));
                                 },
                             ))),
-                    })
-                    .when_some(self.error.clone(), |this, error| {
-                        this.child(div().text_color(rgb(0xaa3030)).child(error))
-                    })
-                    .child(
-                        button(
-                            "open-repository",
-                            if self.opening.is_some() {
-                                "Opening…"
-                            } else {
-                                "Open repository…"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.prompt_repository(cx))),
                     )
-                    .when(directory.is_some(), |this| {
-                        this.child(button("go-home", "Home").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(target) = this.open_target(cx) {
-                                    let result = this.workspace.update(cx, |workspace, cx| {
-                                        workspace.edit(|state| state.go_home(target.tab), cx)
-                                    });
-                                    this.error = result.err().map(|error| error.to_string());
-                                    cx.notify();
-                                }
-                            },
-                        )))
-                    })
-                    .when(directory.is_none(), |this| {
-                        this.children(recent.into_iter().map(|(id, title)| {
+                })
+                .child(
+                    div()
+                        .id("content-frame")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .mx_2()
+                        .mb_2()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.paper)
+                        .child(
                             div()
-                                .id(("recent-project", id.as_u64()))
-                                .cursor_pointer()
-                                .child(title)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.open_saved(id, cx)),
+                                .flex()
+                                .gap_2()
+                                .child(self.navigation_button(
+                                    "navigate-back",
+                                    "Back",
+                                    Command::Back,
+                                    theme,
+                                    cx,
+                                ))
+                                .child(self.navigation_button(
+                                    "navigate-forward",
+                                    "Forward",
+                                    Command::Forward,
+                                    theme,
+                                    cx,
+                                )),
+                        )
+                        .child(div().text_lg().child(title))
+                        .when_some(directory.clone(), |this, directory| {
+                            this.child(div().text_sm().text_color(theme.muted).child(directory))
+                        })
+                        .when(directory.is_some(), |this| match &self.repository {
+                            RepositoryStatus::Loading => this.child("Opening repository…"),
+                            RepositoryStatus::Ready => this
+                                .when_some(self.repository_view.clone(), |this, view| {
+                                    this.child(div().flex_1().min_h_0().child(view))
+                                }),
+                            RepositoryStatus::Unavailable(error) => this
+                                .child(
+                                    div()
+                                        .text_color(theme.error)
+                                        .child(format!("Repository unavailable: {error}")),
                                 )
-                        }))
-                    }),
-            );
+                                .child(button("retry-repository", "Retry", theme).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.selection = None;
+                                        this.load_project(cx);
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(button("close-tab", "Close tab", theme).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.top_bar.update(cx, |bar, cx| {
+                                            bar.dispatch(Msg::CloseActive, window, cx)
+                                        });
+                                    }),
+                                )),
+                        })
+                        .when_some(self.error.clone(), |this, error| {
+                            this.child(div().text_color(theme.error).child(error))
+                        })
+                        .child(
+                            button(
+                                "open-repository",
+                                if self.opening.is_some() {
+                                    "Opening…"
+                                } else {
+                                    "Open repository…"
+                                },
+                                theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.prompt_repository(cx))),
+                        )
+                        .when(directory.is_some(), |this| {
+                            this.child(button("go-home", "Home", theme).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(target) = this.open_target(cx) {
+                                        let result = this.workspace.update(cx, |workspace, cx| {
+                                            workspace.edit(|state| state.go_home(target.tab), cx)
+                                        });
+                                        this.error = result.err().map(|error| error.to_string());
+                                        cx.notify();
+                                    }
+                                },
+                            )))
+                        })
+                        .when(directory.is_none(), |this| {
+                            this.children(recent.into_iter().map(|(id, title)| {
+                                div()
+                                    .id(("recent-project", id.as_u64()))
+                                    .cursor_pointer()
+                                    .child(title)
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.open_saved(id, cx)),
+                                    )
+                            }))
+                        }),
+                );
         #[cfg(any(debug_assertions, feature = "frame-metrics"))]
         let root = root.child(self.debug_panel.clone());
         root

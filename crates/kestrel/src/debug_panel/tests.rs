@@ -262,8 +262,8 @@ fn overlay_is_bottom_right_out_of_flow_and_click_through(cx: &mut TestAppContext
     let content = cx.debug_bounds("content").unwrap();
     let viewport = cx.update(|window, _| window.viewport_size());
     assert_eq!(content.size, viewport);
-    assert_eq!(overlay.right(), content.right() - px(8.));
-    assert_eq!(overlay.bottom(), content.bottom() - px(8.));
+    assert_eq!(overlay.right(), content.right() - px(16.));
+    assert_eq!(overlay.bottom(), content.bottom() - px(16.));
     cx.simulate_click(overlay.center(), Modifiers::none());
     assert_eq!(host.read_with(cx, |host, _| host.clicks), 1);
 }

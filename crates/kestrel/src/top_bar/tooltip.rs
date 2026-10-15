@@ -1,9 +1,12 @@
-use gpui::{AnyView, App, Context, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{AnyView, App, Context, SharedString, Window, div, prelude::*, px};
+
+use crate::appearance::Theme;
 
 struct Tooltip(SharedString);
 
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(window, cx);
         div()
             .id("tab-tooltip")
             .debug_selector(|| format!("tooltip-{}", self.0))
@@ -12,11 +15,11 @@ impl Render for Tooltip {
             .py_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0xd5d6da))
-            .bg(rgb(0xffffff))
+            .border_color(theme.border)
+            .bg(theme.paper)
             .shadow_md()
             .text_sm()
-            .text_color(rgb(0x25262a))
+            .text_color(theme.text)
             .child(self.0.clone())
     }
 }
