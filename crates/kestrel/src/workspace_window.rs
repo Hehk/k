@@ -91,11 +91,9 @@ impl Kestrel {
             cx.observe_window_activation(window, |this, window, cx| {
                 commands::refresh_later(cx);
                 window.refresh();
-                if window.is_window_active() {
-                    let _ = this.workspace.update(cx, |workspace, cx| {
-                        workspace.edit(|state| state.focus_window(this.id), cx)
-                    });
-                }
+                this.workspace.update(cx, |workspace, cx| {
+                    workspace.window_activation(this.id, window.is_window_active(), cx);
+                });
             }),
         ];
         let mut this = Self {
@@ -130,9 +128,11 @@ impl Kestrel {
         let handle = cx.open_window(crate::window_options(Some(bounds)), |window, cx| {
             cx.new(|cx| Self::new(shared, id, window, cx))
         })?;
-        workspace.update(cx, |workspace, _| {
-            workspace.register_window(id, handle.into());
-        });
+        handle.update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, _| {
+                workspace.register_window(id, handle.into(), window.is_window_active());
+            });
+        })?;
         Ok(handle)
     }
 
@@ -234,9 +234,10 @@ impl Kestrel {
             Self::open(workspace.clone(), id, cx)?;
         }
         workspace.update(cx, |workspace, cx| {
-            workspace.finish_reopen(state, cx);
+            workspace.finish_reopen(state, cx)?;
             workspace.activate_window(id, cx);
-        });
+            Ok::<_, StateError>(())
+        })?;
         Ok(())
     }
 

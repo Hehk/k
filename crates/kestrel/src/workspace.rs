@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
@@ -11,6 +11,7 @@ use gpui::{
 use kestrel::{
     state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
     storage::{self, Store},
+    viewing_history::{Foreground, ViewChange, ViewingHistory, ViewingId},
 };
 
 use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
@@ -75,8 +76,18 @@ impl Writer {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Consumed by the later history UI layer")
+)]
+pub enum OpenViewIn {
+    Tab(TabId),
+    NewTab(WindowId),
+}
+
 pub struct Workspace {
     state: AppState,
+    viewing_history: ViewingHistory,
     writer: Option<Arc<Mutex<Writer>>>,
     revision: u64,
     save_task: Option<Task<()>>,
@@ -87,6 +98,8 @@ pub struct Workspace {
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
     watching_repositories: bool,
+    // Native focus can be absent while the persisted active window still names the last window.
+    foreground: Option<WindowId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -113,6 +126,7 @@ impl Workspace {
         });
         Self {
             state: loaded.state,
+            viewing_history: ViewingHistory::default(),
             writer: loaded.writer.map(|writer| Arc::new(Mutex::new(writer))),
             revision: 0,
             save_task: None,
@@ -123,6 +137,7 @@ impl Workspace {
             native_windows: HashMap::new(),
             repository_snapshots: HashMap::new(),
             watching_repositories: false,
+            foreground: None,
             _subscriptions: vec![quit, closed],
         }
     }
@@ -169,6 +184,44 @@ impl Workspace {
         &self.state
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by the later history UI layer")
+    )]
+    pub fn viewing_history(&self) -> &ViewingHistory {
+        &self.viewing_history
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by the later history UI layer")
+    )]
+    pub fn open_view(
+        &mut self,
+        id: ViewingId,
+        target: OpenViewIn,
+        cx: &mut Context<Self>,
+    ) -> Result<TabId, StateError> {
+        let snapshot = self
+            .viewing_history
+            .get(id)
+            .ok_or(StateError("unknown viewing record"))?
+            .viewed
+            .snapshot
+            .clone();
+        self.edit(
+            |state| {
+                let tab = match target {
+                    OpenViewIn::Tab(tab) => tab,
+                    OpenViewIn::NewTab(window) => state.new_tab(window)?,
+                };
+                state.navigate(tab, Navigation::OpenSnapshot(snapshot))?;
+                Ok(tab)
+            },
+            cx,
+        )
+    }
+
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
@@ -195,13 +248,30 @@ impl Workspace {
             return Err(StateError("application is quitting"));
         }
         let mut state = self.state.clone();
-        let result = change(&mut state)?;
-        self.replace(state, cx);
+        let (result, changes) = state.collect_view_changes(self.viewing_foreground(), change)?;
+        self.commit(state, changes, cx);
         Ok(result)
     }
 
     pub fn replace(&mut self, state: AppState, cx: &mut Context<Self>) {
-        if self.quitting || self.state == state {
+        self.commit(state, Vec::new(), cx);
+    }
+
+    fn commit(&mut self, state: AppState, changes: Vec<ViewChange>, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        let viewed = self.viewing_history.apply(changes, || {
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as i64,
+                Err(error) => -(error.duration().as_millis() as i64),
+            }
+        });
+        self.viewing_history.retain_live_bindings(&state);
+        if self.state == state {
+            if viewed {
+                cx.notify();
+            }
             return;
         }
         self.closed.extend(Closed::removed(&self.state, &state));
@@ -215,6 +285,9 @@ impl Workspace {
 
     pub fn close_window(&mut self, id: WindowId, cx: &mut Context<Self>) {
         self.native_windows.remove(&id);
+        if self.foreground == Some(id) {
+            self.foreground = None;
+        }
         if !self.quitting {
             let _ = self.edit(
                 |state| {
@@ -245,13 +318,54 @@ impl Workspace {
         Ok(Some((state, id)))
     }
 
-    pub fn finish_reopen(&mut self, state: AppState, cx: &mut Context<Self>) {
+    pub fn finish_reopen(
+        &mut self,
+        mut state: AppState,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StateError> {
+        if self.quitting {
+            return Err(StateError("application is quitting"));
+        }
+        let (_, changes) = state.collect_view_changes(self.viewing_foreground(), |state| {
+            let tab = state
+                .active_window()
+                .and_then(|id| state.window(id).ok())
+                .and_then(|window| window.active_tab)
+                .ok_or(StateError("reopened container has no active tab"))?;
+            state.navigate(tab, Navigation::ReopenTab)
+        })?;
         self.closed.pop();
-        self.replace(state, cx);
+        self.commit(state, changes, cx);
+        Ok(())
     }
 
-    pub fn register_window(&mut self, id: WindowId, handle: AnyWindowHandle) {
+    fn viewing_foreground(&self) -> Foreground {
+        if self.native_windows.is_empty() {
+            Foreground::SelectedWindow
+        } else {
+            self.foreground
+                .map_or(Foreground::Hidden, Foreground::Window)
+        }
+    }
+
+    pub fn register_window(&mut self, id: WindowId, handle: AnyWindowHandle, active: bool) {
         self.native_windows.insert(id, handle);
+        if active {
+            self.foreground = Some(id);
+        }
+    }
+
+    pub fn window_activation(&mut self, id: WindowId, active: bool, cx: &mut Context<Self>) {
+        if active {
+            let changed = self.foreground != Some(id);
+            self.foreground = Some(id);
+            if (changed || self.state.active_window() != Some(id)) && self.state.window(id).is_ok()
+            {
+                let _ = self.edit(|state| state.focus_window(id), cx);
+            }
+        } else if self.foreground == Some(id) {
+            self.foreground = None;
+        }
     }
 
     pub fn activate_window(&self, id: WindowId, cx: &mut App) {
@@ -362,47 +476,7 @@ pub fn set_tab_layout(
     tabs: &[u64],
     active: Option<u64>,
 ) -> Result<(), StateError> {
-    let previous = state
-        .window(id)?
-        .tabs
-        .iter()
-        .map(|tab| tab.id)
-        .collect::<Vec<_>>();
-    let tabs = tabs
-        .iter()
-        .map(|id| {
-            previous
-                .iter()
-                .find(|tab| tab.as_u64() == *id)
-                .copied()
-                .ok_or(StateError("tab is not in this window"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if tabs
-        .iter()
-        .enumerate()
-        .any(|(index, id)| tabs[..index].contains(id))
-    {
-        return Err(StateError("duplicate tab"));
-    }
-    let selected = active.and_then(|id| tabs.iter().find(|tab| tab.as_u64() == id).copied());
-    if (tabs.is_empty() && active.is_some()) || (!tabs.is_empty() && selected.is_none()) {
-        return Err(StateError("invalid active tab"));
-    }
-    for tab in previous {
-        if !tabs.contains(&tab) {
-            state.close_tab(tab);
-        }
-    }
-    for (index, tab) in tabs.iter().enumerate() {
-        if state.window(id)?.tabs[index].id != *tab {
-            state.move_tab(*tab, id, index)?;
-        }
-    }
-    if let Some(tab) = selected {
-        state.navigate(tab, Navigation::SelectTab)?;
-    }
-    Ok(())
+    state.set_tab_layout(id, tabs, active)
 }
 
 #[cfg(test)]

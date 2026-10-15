@@ -91,6 +91,29 @@ impl Tab {
             self.route = route;
             return Ok(());
         }
+        self.push_visit(route, before)
+    }
+
+    pub(super) fn open_snapshot(&mut self, snapshot: Snapshot) -> Result<(), StateError> {
+        let remembered = snapshot
+            .project()
+            .and_then(|project| {
+                if self.route.project() == Some(project) {
+                    self.route.review()
+                } else {
+                    self.remembered(project)
+                }
+            })
+            .cloned()
+            .unwrap_or_default();
+        snapshot.view.browsing.check_paths()?;
+        let route = snapshot.restore(remembered);
+        Snapshot::capture(&route)?;
+        // An explicit historical selection is a new visit, even for the same destination.
+        self.push_visit(route, self.snapshot()?)
+    }
+
+    fn push_visit(&mut self, route: Route, before: Visit) -> Result<(), StateError> {
         let activation = self
             .activation
             .checked_add(1)

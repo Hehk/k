@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{
     git::RepositoryInfo,
     review::{Comparison, GitPath, RefName},
+    viewing_history::{Foreground, ViewChange},
 };
 
 mod navigation;
@@ -238,13 +239,45 @@ pub struct WorkspaceWindow {
     pub active_tab: Option<TabId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AppState {
     projects: Vec<Project>,
     windows: Vec<WorkspaceWindow>,
     active_window: Option<WindowId>,
     next_id: u64,
+    #[serde(skip)]
+    view_changes: Option<ViewCollection>,
 }
+
+#[derive(Debug)]
+struct ViewCollection {
+    foreground: Foreground,
+    changes: Vec<ViewChange>,
+}
+
+// Policy outputs belong to the edit transaction, not to a cloned or compared workspace.
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            projects: self.projects.clone(),
+            windows: self.windows.clone(),
+            active_window: self.active_window,
+            next_id: self.next_id,
+            view_changes: None,
+        }
+    }
+}
+
+impl PartialEq for AppState {
+    fn eq(&self, other: &Self) -> bool {
+        self.projects == other.projects
+            && self.windows == other.windows
+            && self.active_window == other.active_window
+            && self.next_id == other.next_id
+    }
+}
+
+impl Eq for AppState {}
 
 impl Default for AppState {
     fn default() -> Self {
@@ -253,6 +286,7 @@ impl Default for AppState {
             windows: Vec::new(),
             active_window: None,
             next_id: 1,
+            view_changes: None,
         }
     }
 }
@@ -273,6 +307,7 @@ impl<'de> Deserialize<'de> for AppState {
             windows: fields.windows,
             active_window: fields.active_window,
             next_id: fields.next_id,
+            view_changes: None,
         };
         state.check_loaded().map_err(D::Error::custom)?;
         Ok(state)
@@ -306,6 +341,7 @@ impl AppState {
     pub fn focus_window(&mut self, id: WindowId) -> Result<(), StateError> {
         self.window(id)?;
         self.active_window = Some(id);
+        self.show_pending_view();
         Ok(())
     }
 

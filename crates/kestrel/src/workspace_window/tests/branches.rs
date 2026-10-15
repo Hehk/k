@@ -259,6 +259,85 @@ fn branch_list_scroll_returns_with_the_visit(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn global_viewing_counts_navigation_once_not_rendering_resolution_or_refresh(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (workspace, handle) = fixture.start(cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    let count = |cx: &TestAppContext| {
+        workspace.read_with(cx, |workspace, _| {
+            workspace.viewing_history().records().len()
+        })
+    };
+    assert_eq!(count(cx), 1);
+    click(cx, "branch:refs/heads/topic");
+    assert_eq!(count(cx), 2);
+    workspace.read_with(cx, |workspace, _| {
+        let record = workspace.viewing_history().records().last().unwrap();
+        assert_eq!(record.viewed.labels.file.as_deref(), Some("file.rs"));
+        assert!(matches!(
+            record.viewed.snapshot.destination,
+            kestrel::state::Destination::Comparison {
+                comparison: Some(_),
+                ..
+            }
+        ));
+    });
+    for _ in 0..5 {
+        redraw(cx);
+    }
+    click(cx, "refresh-review-refs");
+    click(cx, "latest-review");
+    assert_eq!(count(cx), 2);
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    assert_eq!(count(cx), 3);
+    cx.simulate_keystrokes("cmd-]");
+    redraw(cx);
+    assert_eq!(count(cx), 4);
+    fixture.commit(
+        "refs/heads/topic",
+        Some(fixture.topic),
+        500,
+        "new content\n",
+    );
+    click(cx, "latest-review");
+    assert_eq!(count(cx), 5);
+}
+
+#[gpui::test]
+fn background_completion_waits_for_window_activation_even_if_its_tab_is_selected(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let id = workspace.read_with(cx, |workspace, _| workspace.state().windows()[0].id);
+    workspace.update(cx, |workspace, cx| {
+        workspace.window_activation(id, false, cx);
+        workspace
+            .navigate(
+                tab,
+                kestrel::state::Navigation::SelectBranch("refs/heads/topic".into()),
+                cx,
+            )
+            .unwrap();
+    });
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    redraw(cx);
+    workspace.update(cx, |workspace, cx| {
+        assert_eq!(workspace.viewing_history().records().len(), 1);
+        workspace.window_activation(id, true, cx);
+        assert_eq!(workspace.viewing_history().records().len(), 2);
+        workspace.window_activation(id, true, cx);
+        workspace.window_activation(id, false, cx);
+        workspace.window_activation(id, true, cx);
+        assert_eq!(workspace.viewing_history().records().len(), 2);
+    });
+}
+
+#[gpui::test]
 fn restoring_windows_keeps_the_last_used_review_for_new_tabs(cx: &mut TestAppContext) {
     use kestrel::{
         state::{AppState, BaseSelection, Browsing, ComparisonChange},

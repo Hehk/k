@@ -5,6 +5,8 @@ use kestrel::{git::RepositoryInfo, review::RefName};
 
 use super::*;
 
+mod viewing;
+
 fn project(state: &mut AppState, name: &str) -> kestrel::state::ProjectId {
     let directory = std::env::temp_dir().join(name);
     state
