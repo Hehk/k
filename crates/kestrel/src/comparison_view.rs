@@ -62,7 +62,7 @@ pub struct ComparisonView {
     patch_revision: u64,
     selection: Option<(Entity<DiffSelection>, [Subscription; 2])>,
     scroll: UniformListScrollHandle,
-    scroll_row: u32,
+    synced_scroll_row: u32,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -268,7 +268,7 @@ impl ComparisonView {
             patch_revision: 0,
             selection: None,
             scroll: UniformListScrollHandle::new(),
-            scroll_row: 0,
+            synced_scroll_row: 0,
             error: None,
             _subscriptions: subscriptions,
         };
@@ -490,7 +490,7 @@ impl ComparisonView {
             return;
         };
         if self.patch_key.as_ref() == Some(&change) {
-            if self.scroll_row != browsing.first_visible_line {
+            if self.synced_scroll_row != browsing.first_visible_line {
                 self.restore_scroll(browsing.first_visible_line);
             }
             return;
@@ -588,7 +588,7 @@ impl ComparisonView {
     }
 
     fn restore_scroll(&mut self, row: u32) {
-        self.scroll_row = row;
+        self.synced_scroll_row = row;
         // The list applies this after layout, once its row and viewport sizes are known.
         self.scroll
             .scroll_to_item_strict(row as usize, ScrollStrategy::Top);
@@ -602,7 +602,7 @@ impl ComparisonView {
             .floor()
             .max(0.) as u32;
         if browsing.first_visible_line != row {
-            self.scroll_row = row;
+            self.synced_scroll_row = row;
             browsing.first_visible_line = row;
             self.set_browsing(browsing, cx);
         }
