@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     git::RepositoryInfo,
-    review::{Endpoints, GitPath},
-    state::{BranchList, BranchSort, Browsing, ReadingMode},
-    viewing_history::Foreground,
+    review::{Comparison, Endpoints, GitPath, RefName},
+    state::{BaseSelection, BranchList, BranchSort, Browsing, Destination, ReadingMode},
+    viewing_history::{Foreground, ViewingId},
 };
 
 fn history(directory: &Path) -> (AppState, ViewingHistory) {
@@ -182,13 +182,8 @@ fn corrupt_unsupported_and_invalid_logs_are_preserved_before_replacement() {
     *damaged.last_mut().unwrap() ^= 1;
     let mut trailing = valid.clone();
     trailing.push(0);
-    let mut invalid = history
-        .records()
-        .iter()
-        .map(SavedRecord::capture)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    invalid[1].view.browsing.file = Some("../escape".into());
+    let mut invalid = history.records().to_vec();
+    invalid[1].viewed.snapshot.view.browsing.file = Some("../escape".into());
     for bytes in [
         b"not history".to_vec(),
         future,
@@ -282,11 +277,59 @@ fn incomplete_temporary_writes_and_invalid_snapshots_leave_the_last_file_intact(
 
 #[cfg(unix)]
 #[test]
-fn v1_fixture_locks_the_wire_schema() {
+fn v1_fixture_migrates_without_recovery_or_changing_visits() {
+    let (_, expected) = history(Path::new("/repositories/example"));
+    let original = include_bytes!("fixtures/v1.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.bin");
+    fs::write(&path, original).unwrap();
+    let mut state = AppState::default();
+    let mut store = Store::new(path.clone());
+    let loaded = store.load(&mut state).unwrap();
+    assert!(loaded.recovery.is_none());
+    assert_eq!(loaded.history.records(), expected.records());
+    assert!(loaded.history.bindings.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    store.save(loaded.history.records()).unwrap();
+    let saved = fs::read(path).unwrap();
+    assert_eq!(&saved[8..12], &VERSION.to_le_bytes());
+    assert_eq!(
+        decode(&saved, &mut state).unwrap().records(),
+        expected.records()
+    );
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn invalid_record_ids_utility_pages_and_repository_paths_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, history) = history(&dir.path().join("repo"));
+    for case in 0..4 {
+        let mut records = history.records().to_vec();
+        match case {
+            0 => records[1].id = ViewingId(0),
+            1 => records[1].id = ViewingId(99),
+            2 => records[1].viewed.snapshot.destination = Destination::Home,
+            3 => records[1].viewed.repository.directory = "relative/path".into(),
+            _ => unreachable!(),
+        }
+        assert!(encode(&records).is_err());
+        let mut state = AppState::default();
+        let before = state.clone();
+        assert!(decode(&frame(&records).unwrap(), &mut state).is_err());
+        assert_eq!(state, before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn v2_fixture_locks_direct_record_serialization() {
     let (_, history) = history(Path::new("/repositories/example"));
     let bytes = encode(history.records()).unwrap();
+    let records: Vec<Record> = postcard::from_bytes(&bytes[HEADER_LEN..]).unwrap();
+    assert_eq!(records, history.records());
     let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewing_history/storage/fixtures/v1.bin");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewing_history/storage/fixtures/v2.bin");
     if std::env::var_os("UPDATE_HISTORY_FIXTURE").is_some() {
         fs::create_dir_all(fixture.parent().unwrap()).unwrap();
         fs::write(fixture, bytes).unwrap();
@@ -295,7 +338,7 @@ fn v1_fixture_locks_the_wire_schema() {
     let saved = fs::read(fixture).unwrap();
     assert_eq!(
         bytes, saved,
-        "v1 schema changed; review versioning before regenerating the fixture"
+        "v2 schema changed; review versioning before regenerating the fixture"
     );
     let restored = decode(&saved, &mut AppState::default()).unwrap();
     assert_eq!(restored.records(), history.records());

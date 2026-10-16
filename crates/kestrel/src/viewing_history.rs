@@ -52,7 +52,7 @@ impl RepositoryIdentity {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ViewingId(pub u64);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ pub struct Labels {
     pub file: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Viewed {
     pub repository: RepositoryIdentity,
     pub snapshot: Snapshot,
@@ -86,7 +86,7 @@ impl Viewed {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub id: ViewingId,
     /// Unix milliseconds. Append order determines recency even if the clock moves backward.

@@ -4,29 +4,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{Labels, Record, RepositoryIdentity, Viewed, ViewingHistory, ViewingId};
+use super::{Record, ViewingHistory};
 use crate::{
-    review::{Comparison, RefName},
-    state::{AppState, BaseSelection, Destination, Snapshot, StateError, ViewState},
+    state::{AppState, StateError},
     storage::Recovery,
 };
+
+mod v1;
 
 #[cfg(test)]
 mod tests;
 
-// File v1: magic[8], version:u32 LE, payload length:u64 LE, SHA-256[32], Postcard payload.
-// The payload is Vec<SavedRecord> in append order; its index is the stable ViewingId.
+// Framing: magic[8], version:u32 LE, payload length:u64 LE, SHA-256[32], Postcard payload.
+// File v2 serializes Vec<Record> directly, in append order. IDs must match vector positions.
+// Stored project IDs are not trusted; repository identity replaces them on load.
 // Postcard serializes owned fields, never Rust layout. Enums use declaration-order tags;
 // integers/lengths use varints. Git paths/refs are bytes, object IDs are 40-byte hex strings,
 // and local paths use the existing tagged Unix-bytes/Windows-u16 codec.
-// SavedRecord, SavedDestination, Labels, ViewState, BaseSelection and Comparison form the
-// v1 schema. Changing their serialized form requires a new version and fixture/migration.
+// Record and its nested application types form the v2 schema. Changing their serialized
+// form requires a new version and fixture/migration. V1 decoding is isolated in v1.rs.
 const MAGIC: &[u8; 8] = b"KSTRHIST";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 52;
 
 #[derive(Debug, Error)]
@@ -43,95 +44,6 @@ pub enum Error {
     Integrity,
     #[error("history must be loaded or safely recovered before saving")]
     NotLoaded,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedRecord {
-    timestamp_ms: i64,
-    repository: RepositoryIdentity,
-    destination: SavedDestination,
-    view: ViewState,
-    labels: Labels,
-}
-
-#[derive(Serialize, Deserialize)]
-enum SavedDestination {
-    Branches,
-    Comparison {
-        branch: RefName,
-        base: BaseSelection,
-        comparison: Option<Comparison>,
-    },
-}
-
-impl SavedRecord {
-    fn capture(record: &Record) -> Result<Self, Error> {
-        let Viewed {
-            repository,
-            snapshot,
-            labels,
-        } = &record.viewed;
-        snapshot.check()?;
-        if !repository.directory.is_absolute() || !repository.common_dir.is_absolute() {
-            return Err(StateError("history repository paths must be absolute").into());
-        }
-        let destination = match &snapshot.destination {
-            Destination::Home => {
-                return Err(StateError("utility pages are not viewing records").into());
-            }
-            Destination::Branches(_) => SavedDestination::Branches,
-            Destination::Comparison {
-                branch,
-                base,
-                comparison,
-                ..
-            } => SavedDestination::Comparison {
-                branch: branch.clone(),
-                base: base.clone(),
-                comparison: comparison.clone(),
-            },
-        };
-        Ok(Self {
-            timestamp_ms: record.timestamp_ms,
-            repository: repository.clone(),
-            destination,
-            view: snapshot.view.clone(),
-            labels: labels.clone(),
-        })
-    }
-
-    fn restore(self, id: usize, state: &mut AppState) -> Result<Record, Error> {
-        // Paths, not IDs from a separately saved workspace, identify the repository. No Git IO:
-        // missing repositories and missing objects remain reopenable, unavailable destinations.
-        let project = self.repository.register(state)?;
-        let destination = match self.destination {
-            SavedDestination::Branches => Destination::Branches(project),
-            SavedDestination::Comparison {
-                branch,
-                base,
-                comparison,
-            } => Destination::Comparison {
-                project,
-                branch,
-                base,
-                comparison,
-            },
-        };
-        let snapshot = Snapshot {
-            destination,
-            view: self.view,
-        };
-        snapshot.check()?;
-        Ok(Record {
-            id: ViewingId(id as u64),
-            timestamp_ms: self.timestamp_ms,
-            viewed: Viewed {
-                repository: self.repository,
-                snapshot,
-                labels: self.labels,
-            },
-        })
-    }
 }
 
 pub struct Loaded {
@@ -227,21 +139,30 @@ impl Store {
 }
 
 fn encode(records: &[Record]) -> Result<Vec<u8>, Error> {
-    let saved = records
-        .iter()
-        .enumerate()
-        .map(|(index, record)| {
-            if record.id.0 != index as u64 {
-                return Err(StateError("history IDs must match append order").into());
-            }
-            SavedRecord::capture(record)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    frame(&saved)
+    check(records)?;
+    frame(records)
 }
 
-fn frame(saved: &[SavedRecord]) -> Result<Vec<u8>, Error> {
-    let payload = postcard::to_stdvec(saved)?;
+fn check(records: &[Record]) -> Result<(), Error> {
+    for (index, record) in records.iter().enumerate() {
+        if record.id.0 != index as u64 {
+            return Err(StateError("history IDs must match append order").into());
+        }
+        let viewed = &record.viewed;
+        if viewed.snapshot.project().is_none() {
+            return Err(StateError("utility pages are not viewing records").into());
+        }
+        if !viewed.repository.directory.is_absolute() || !viewed.repository.common_dir.is_absolute()
+        {
+            return Err(StateError("history repository paths must be absolute").into());
+        }
+        viewed.snapshot.check()?;
+    }
+    Ok(())
+}
+
+fn frame(records: &[Record]) -> Result<Vec<u8>, Error> {
+    let payload = postcard::to_stdvec(records)?;
     let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -255,28 +176,36 @@ fn decode(bytes: &[u8], state: &mut AppState) -> Result<ViewingHistory, Error> {
     if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC {
         return Err(Error::Integrity);
     }
-    if bytes[8..12] != VERSION.to_le_bytes() {
+    let version = if bytes[8..12] == VERSION.to_le_bytes() {
+        VERSION
+    } else if bytes[8..12] == 1u32.to_le_bytes() {
+        1
+    } else {
         return Err(Error::Version);
-    }
+    };
     let payload = &bytes[HEADER_LEN..];
     if bytes[12..20] != (payload.len() as u64).to_le_bytes()
         || bytes[20..HEADER_LEN] != Sha256::digest(payload)[..]
     {
         return Err(Error::Integrity);
     }
-    let (saved, rest) = postcard::take_from_bytes::<Vec<SavedRecord>>(payload)?;
-    if !rest.is_empty() {
-        return Err(Error::Integrity);
-    }
     // A rejected record must not partly change the otherwise usable workspace catalog.
     let mut candidate = state.clone();
+    let mut records = if version == 1 {
+        v1::decode(payload, &mut candidate)?
+    } else {
+        let (records, rest) = postcard::take_from_bytes::<Vec<Record>>(payload)?;
+        if !rest.is_empty() {
+            return Err(Error::Integrity);
+        }
+        records
+    };
+    check(&records)?;
     // TODO: Registration repeats a linear project lookup per record. Measure many-repository
     // loads before introducing a catalog index; the sizing fixture uses just one repository.
-    let records = saved
-        .into_iter()
-        .enumerate()
-        .map(|(index, record)| record.restore(index, &mut candidate))
-        .collect::<Result<Vec<_>, _>>()?;
+    for record in &mut records {
+        record.viewed.snapshot = record.viewed.snapshot_for(&mut candidate)?;
+    }
     *state = candidate;
     Ok(ViewingHistory {
         records,
