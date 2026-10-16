@@ -5,6 +5,7 @@ mod comparison_view;
 mod controls;
 #[cfg(any(debug_assertions, feature = "frame-metrics"))]
 mod debug_panel;
+mod diff_selection;
 mod native;
 mod repository_model;
 mod repository_view;

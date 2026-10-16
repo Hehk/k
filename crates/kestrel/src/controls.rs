@@ -1,3 +1,7 @@
+mod tooltip;
+
+pub use tooltip::tooltip;
+
 use gpui::{Div, SharedString, Stateful, div, prelude::*};
 
 use crate::appearance::Theme;

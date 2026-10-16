@@ -3,10 +3,84 @@ use crate::workspace::{LoadedWorkspace, Workspace};
 use gpui::{Entity, TestAppContext};
 use kestrel::{
     git::RepositoryInfo,
-    review::{DiffSide, Endpoints, Hunk},
+    review::{DiffSide, Endpoints, FileEntry, Hunk},
     state::TabId,
     storage::Store,
 };
+
+#[test]
+fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
+    let entry = |path: GitPath| FileEntry {
+        path,
+        id: "1111111111111111111111111111111111111111".parse().unwrap(),
+        mode: 0o100644,
+    };
+    let old = entry("crates/old_module/mod.rs".into());
+    let new = entry("crates/deeply/nested/new_module/mod.rs".into());
+    for (change, status, name, directory, tooltip) in [
+        (
+            FileChange::Added {
+                new: entry("README.md".into()),
+            },
+            "A",
+            "README.md",
+            None,
+            "README.md",
+        ),
+        (
+            FileChange::Modified {
+                old: new.clone(),
+                new: new.clone(),
+            },
+            "M",
+            "mod.rs",
+            Some("crates/deeply/nested/new_module"),
+            "crates/deeply/nested/new_module/mod.rs",
+        ),
+        (
+            FileChange::Deleted { old: old.clone() },
+            "D",
+            "mod.rs",
+            Some("crates/old_module"),
+            "crates/old_module/mod.rs",
+        ),
+        (
+            FileChange::Renamed {
+                old: old.clone(),
+                new: new.clone(),
+            },
+            "R",
+            "mod.rs",
+            Some("crates/deeply/nested/new_module"),
+            "crates/old_module/mod.rs → crates/deeply/nested/new_module/mod.rs",
+        ),
+        (
+            FileChange::TypeChanged { old, new },
+            "T",
+            "mod.rs",
+            Some("crates/deeply/nested/new_module"),
+            "crates/deeply/nested/new_module/mod.rs",
+        ),
+    ] {
+        let label = FileLabel::new(&change);
+        assert_eq!(
+            (
+                label.status,
+                label.name.as_str(),
+                label.directory.as_deref(),
+                label.tooltip.as_str()
+            ),
+            (status, name, directory, tooltip)
+        );
+    }
+    let raw_path = GitPath(b"nested/\xff.rs".to_vec());
+    let change = FileChange::Added {
+        new: entry(raw_path.clone()),
+    };
+    let label = FileLabel::new(&change);
+    assert_eq!(label.name, "�.rs");
+    assert_eq!(path(&change), &raw_path);
+}
 
 #[test]
 fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
@@ -41,7 +115,7 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
             }],
         },
     ]);
-    let PreparedPatch::Rows { rows, widest } = PreparedPatch::new(patch) else {
+    let PreparedPatch::Rows { rows, widest, text } = PreparedPatch::new(patch) else {
         panic!()
     };
     let actual = rows
@@ -59,9 +133,9 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
         actual,
         vec![
             ("", "", "@@ -10,2 +20,2 @@", DiffTone::Hunk),
-            ("10", "20", " keep λ  ", DiffTone::Context),
-            ("11", "", "-removed", DiffTone::Deleted),
-            ("", "21", "+added", DiffTone::Added),
+            ("10", "20", "keep λ  ", DiffTone::Context),
+            ("11", "", "removed", DiffTone::Deleted),
+            ("", "21", "added", DiffTone::Added),
             (
                 "",
                 "",
@@ -81,19 +155,31 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
                 DiffTone::Metadata
             ),
             ("", "", header.as_str(), DiffTone::Hunk),
-            ("", "100", "+tail", DiffTone::Added),
+            ("", "100", "tail", DiffTone::Added),
         ]
     );
     assert_eq!(widest, Some(7));
+    assert_eq!(
+        rows.iter().map(|row| row.marker).collect::<Vec<_>>(),
+        vec!["", " ", "-", "+", "", "", "", "", "+"]
+    );
+    assert_eq!(text.as_ref(), "keep λ  \nremoved\nadded\ntail");
+    for row in rows.iter() {
+        if let RowSource::Code(source) = &row.source {
+            assert_eq!(&text[source.clone()], row.text.as_ref());
+        }
+    }
 }
 
 #[test]
 fn preparing_a_patch_preserves_empty_and_unavailable_previews() {
-    let PreparedPatch::Rows { rows, widest } = PreparedPatch::new(FilePatch::Hunks(Vec::new()))
+    let PreparedPatch::Rows { rows, widest, text } =
+        PreparedPatch::new(FilePatch::Hunks(Vec::new()))
     else {
         panic!()
     };
     assert!(rows.is_empty());
+    assert!(text.is_empty());
     assert_eq!(widest, None);
     for reason in [
         PreviewUnavailable::Binary,
@@ -108,6 +194,45 @@ fn preparing_a_patch_preserves_empty_and_unavailable_previews() {
         };
         assert_eq!(actual, reason);
     }
+}
+
+#[test]
+fn prepared_copy_text_preserves_source_markers_blank_lines_and_final_newlines() {
+    for text in ["\n", "+-code\t  \n", "a\u{301}😀", "lone\r", "crlf\r\n"] {
+        let PreparedPatch::Rows { text: plain, .. } =
+            PreparedPatch::new(FilePatch::Hunks(vec![Hunk {
+                header: "@@ header @@\n".into(),
+                lines: vec![
+                    DiffLine::Added {
+                        new_line: 1,
+                        text: text.into(),
+                    },
+                    DiffLine::NoNewline(DiffSide::New),
+                ],
+            }]))
+        else {
+            panic!()
+        };
+        assert_eq!(plain.as_ref(), text.replace("\r\n", "\n"));
+    }
+    let PreparedPatch::Rows { text, .. } = PreparedPatch::new(FilePatch::Hunks(vec![Hunk {
+        header: "@@ header @@\n".into(),
+        lines: vec![
+            DiffLine::Deleted {
+                old_line: 1,
+                text: "old".into(),
+            },
+            DiffLine::NoNewline(DiffSide::Old),
+            DiffLine::Added {
+                new_line: 1,
+                text: "new".into(),
+            },
+            DiffLine::NoNewline(DiffSide::New),
+        ],
+    }])) else {
+        panic!()
+    };
+    assert_eq!(text.as_ref(), "old\nnew");
 }
 
 #[test]

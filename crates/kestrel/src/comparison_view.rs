@@ -17,8 +17,20 @@ use kestrel::{
 
 use crate::{
     appearance::{DiffTone, Theme},
-    controls::control,
+    controls::{control, tooltip},
+    diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{Load, RepositoryModel, branch_label, open},
+};
+
+mod gutter;
+
+const DIFF_NUMBER_WIDTH: f32 = 48.;
+const DIFF_MARKER_WIDTH: f32 = 12.;
+const DIFF_GUTTER_WIDTH: f32 = 2. * DIFF_NUMBER_WIDTH + DIFF_MARKER_WIDTH;
+const DIFF_FONT: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else {
+    "monospace"
 };
 
 pub struct ComparisonView {
@@ -33,6 +45,7 @@ pub struct ComparisonView {
     patch: Load<PreparedPatch>,
     patch_task: Option<Task<()>>,
     patch_revision: u64,
+    selection: Option<(Entity<DiffSelection>, [Subscription; 2])>,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -67,7 +80,9 @@ struct DiffRow {
     old: gpui::SharedString,
     new: gpui::SharedString,
     text: gpui::SharedString,
+    marker: &'static str,
     tone: DiffTone,
+    source: RowSource,
 }
 
 enum PreparedPatch {
@@ -75,6 +90,7 @@ enum PreparedPatch {
     Rows {
         rows: Arc<[DiffRow]>,
         widest: Option<usize>,
+        text: gpui::SharedString,
     },
 }
 
@@ -85,15 +101,19 @@ impl PreparedPatch {
             FilePatch::Hunks(hunks) => hunks,
         };
         let mut rows = Vec::new();
+        let mut plain = String::new();
+        let mut terminated = true;
         for hunk in hunks {
             rows.push(DiffRow {
                 old: "".into(),
                 new: "".into(),
                 text: hunk.header.trim_end().to_owned().into(),
+                marker: "",
                 tone: DiffTone::Hunk,
+                source: RowSource::Boundary(plain.len()),
             });
             for line in hunk.lines {
-                let (old, new, text, tone) = match line {
+                let (old, new, text, tone, prefix) = match line {
                     DiffLine::Context {
                         old_line,
                         new_line,
@@ -101,35 +121,59 @@ impl PreparedPatch {
                     } => (
                         old_line.to_string(),
                         new_line.to_string(),
-                        format!(" {}", text.trim_end_matches(['\r', '\n'])),
+                        text,
                         DiffTone::Context,
+                        Some(" "),
                     ),
                     DiffLine::Added { new_line, text } => (
                         String::new(),
                         new_line.to_string(),
-                        format!("+{}", text.trim_end_matches(['\r', '\n'])),
+                        text,
                         DiffTone::Added,
+                        Some("+"),
                     ),
                     DiffLine::Deleted { old_line, text } => (
                         old_line.to_string(),
                         String::new(),
-                        format!("-{}", text.trim_end_matches(['\r', '\n'])),
+                        text,
                         DiffTone::Deleted,
+                        Some("-"),
                     ),
                     DiffLine::NoNewline(side) => (
                         String::new(),
                         String::new(),
                         format!("\\ No newline at end of file ({side:?})"),
                         DiffTone::Metadata,
+                        None,
                     ),
+                };
+                let (text, source) = if prefix.is_some() {
+                    terminated = text.ends_with('\n');
+                    let text = text
+                        .strip_suffix('\n')
+                        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+                        .unwrap_or(&text);
+                    let start = plain.len();
+                    plain.push_str(text);
+                    let source = RowSource::Code(start..plain.len());
+                    // Old and new rows remain separate even if either side lacks a newline.
+                    plain.push('\n');
+                    (text.to_owned(), source)
+                } else {
+                    (text, RowSource::Boundary(plain.len()))
                 };
                 rows.push(DiffRow {
                     old: old.into(),
                     new: new.into(),
                     text: text.into(),
+                    marker: prefix.unwrap_or(""),
                     tone,
+                    source,
                 });
             }
+        }
+        if !terminated {
+            plain.pop();
         }
         let widest = rows
             .iter()
@@ -139,6 +183,7 @@ impl PreparedPatch {
         Self::Rows {
             rows: rows.into(),
             widest,
+            text: plain.into(),
         }
     }
 }
@@ -149,6 +194,41 @@ fn path(change: &FileChange) -> &GitPath {
         .or_else(|| change.old_file())
         .expect("every change has a file")
         .path
+}
+
+struct FileLabel {
+    status: &'static str,
+    name: String,
+    directory: Option<String>,
+    tooltip: String,
+}
+
+impl FileLabel {
+    fn new(change: &FileChange) -> Self {
+        let label = path(change).label();
+        let (directory, name) = label
+            .rsplit_once('/')
+            .map_or((None, label.as_str()), |(directory, name)| {
+                (Some(directory.to_owned()), name)
+            });
+        Self {
+            status: match change {
+                FileChange::Added { .. } => "A",
+                FileChange::Deleted { .. } => "D",
+                FileChange::Modified { .. } => "M",
+                FileChange::Renamed { .. } => "R",
+                FileChange::TypeChanged { .. } => "T",
+            },
+            name: name.to_owned(),
+            directory,
+            tooltip: match change {
+                FileChange::Renamed { old, new } => {
+                    format!("{} → {}", old.path.label(), new.path.label())
+                }
+                _ => label,
+            },
+        }
+    }
 }
 
 impl ComparisonView {
@@ -173,6 +253,7 @@ impl ComparisonView {
             patch: Load::Loading,
             patch_task: None,
             patch_revision: 0,
+            selection: None,
             error: None,
             _subscriptions: subscriptions,
         };
@@ -187,6 +268,7 @@ impl ComparisonView {
             self.review_task.take();
             self.patch_revision += 1;
             self.patch_task.take();
+            self.selection = None;
             self.patch_key = None;
             self.review_key = key;
             self.base_open = false;
@@ -260,6 +342,7 @@ impl ComparisonView {
         let revision = self.review_revision;
         self.patch_revision += 1;
         self.patch_task.take();
+        self.selection = None;
         self.patch_key = None;
         self.review = ReviewStatus::Loading;
         let project = self.repository.read(cx).project().clone();
@@ -369,6 +452,7 @@ impl ComparisonView {
         self.patch_revision += 1;
         self.patch_task.take();
         self.patch_key = change.clone();
+        self.selection = None;
         self.patch = Load::Loading;
         let Some(change) = change else {
             return;
@@ -390,18 +474,22 @@ impl ComparisonView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let current_file = this
-                    .repository
-                    .read(cx)
-                    .route(cx)
-                    .and_then(Route::review)
-                    .and_then(|review| review.active_review())
-                    .and_then(|review| review.browsing.file.as_ref());
-                if revision != this.patch_revision
-                    || this.current_key(cx).as_ref() != Some(&key)
-                    || current_file != Some(&selected_file)
-                {
+                if !this.patch_matches(revision, &key, &selected_file, cx) {
                     return;
+                }
+                if let Ok(PreparedPatch::Rows { text, .. }) = &result {
+                    let selection =
+                        cx.new(|cx| DiffSelection::new(text.clone(), px(DIFF_GUTTER_WIDTH), cx));
+                    let observe = cx.observe(&selection, |_, _, cx| cx.notify());
+                    let copy =
+                        cx.subscribe(&selection, move |this, _, event: &CopySelection, cx| {
+                            if this.patch_matches(revision, &key, &selected_file, cx) {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    event.0.clone(),
+                                ));
+                            }
+                        });
+                    this.selection = Some((selection, [observe, copy]));
                 }
                 this.patch = match result {
                     Ok(patch) => Load::Ready(patch),
@@ -410,6 +498,19 @@ impl ComparisonView {
                 cx.notify();
             });
         }));
+    }
+
+    fn patch_matches(&self, revision: u64, key: &ReviewKey, file: &GitPath, cx: &App) -> bool {
+        revision == self.patch_revision
+            && self.current_key(cx).as_ref() == Some(key)
+            && self
+                .repository
+                .read(cx)
+                .route(cx)
+                .and_then(Route::review)
+                .and_then(|review| review.active_review())
+                .and_then(|review| review.browsing.file.as_ref())
+                == Some(file)
     }
 
     fn select_file(&mut self, file: GitPath, cx: &mut Context<Self>) {
@@ -551,17 +652,7 @@ impl Render for ComparisonView {
                     .when(!data.changes.is_empty(), |panel| panel.child(div().flex().flex_1().min_h_0().gap_3()
                         .child(uniform_list("changed-files", data.changes.len(), cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             let ReviewStatus::Ready(data) = &this.review else { return Vec::new(); };
-                            range.map(|index| {
-                                let change = &data.changes[index];
-                                let file = path(change).clone();
-                                let label = match change {
-                                    FileChange::Renamed { old, new } => format!("R  {} → {}", old.path.label(), new.path.label()),
-                                    _ => format!("{}  {}", match change { FileChange::Added {..} => "A", FileChange::Deleted {..} => "D", FileChange::TypeChanged {..} => "T", _ => "M" }, file.label()),
-                                };
-                                div().id(index).h(px(30.)).px_2().overflow_hidden().cursor_pointer()
-                                    .when(this.patch_key.as_ref() == Some(change), |row| row.bg(theme.selection))
-                                    .child(label).on_click(cx.listener(move |this, _, _, cx| this.select_file(file.clone(), cx)))
-                            }).collect()
+                            range.map(|index| this.file_row(index, &data.changes[index], theme, cx)).collect()
                         })).w(px(250.)).h_full())
                         .child(div().flex_1().min_w_0().h_full().child(self.file_preview(theme, cx)))))
             }
@@ -571,7 +662,66 @@ impl Render for ComparisonView {
 }
 
 impl ComparisonView {
-    fn file_preview(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
+    fn file_row(
+        &self,
+        index: usize,
+        change: &FileChange,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let file = path(change).clone();
+        let label = FileLabel::new(change);
+        div()
+            .id(index)
+            .debug_selector(move || format!("changed-file-{index}"))
+            .w_full()
+            .h(px(46.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .overflow_hidden()
+            .cursor_pointer()
+            .when(self.patch_key.as_ref() == Some(change), |row| {
+                row.bg(theme.selection)
+            })
+            .tooltip(tooltip(label.tooltip))
+            .child(
+                div()
+                    .w(px(16.))
+                    .flex_shrink_0()
+                    .text_sm()
+                    .child(label.status),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .debug_selector(move || format!("file-name-{index}"))
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_ellipsis()
+                            .child(label.name),
+                    )
+                    .when_some(label.directory, |column, directory| {
+                        column.child(
+                            div()
+                                .debug_selector(move || format!("file-directory-{index}"))
+                                .text_xs()
+                                .text_color(theme.muted)
+                                .text_ellipsis()
+                                .child(directory),
+                        )
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.select_file(file.clone(), cx)))
+    }
+
+    fn file_preview(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -593,7 +743,7 @@ impl ComparisonView {
             .child(div().flex_1().min_h_0().child(self.diff(theme, cx)))
     }
 
-    fn diff(&self, theme: Theme, cx: &Context<Self>) -> gpui::AnyElement {
+    fn diff(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         match &self.patch {
             Load::Loading => div().child("Loading diff…").into_any_element(),
             Load::Failed(error) => div()
@@ -622,50 +772,46 @@ impl ComparisonView {
             Load::Ready(PreparedPatch::Rows { rows, .. }) if rows.is_empty() => div()
                 .child("No text changes (metadata or mode change).")
                 .into_any_element(),
-            Load::Ready(PreparedPatch::Rows { rows, widest }) => {
+            Load::Ready(PreparedPatch::Rows { rows, widest, .. }) => {
                 let rows = Arc::clone(rows);
-                uniform_list("diff-lines", rows.len(), move |range, _, _| {
+                let selection = self
+                    .selection
+                    .as_ref()
+                    .expect("loaded text patches have a selection controller")
+                    .0
+                    .clone();
+                let row_selection = selection.clone();
+                let gutter = gutter::DiffGutter(Arc::clone(&rows));
+                let list = uniform_list("diff-lines", rows.len(), move |range, window, cx| {
                     range
                         .map(|index| {
                             let DiffRow {
-                                old,
-                                new,
-                                text,
-                                tone,
+                                text, tone, source, ..
                             } = &rows[index];
                             div()
                                 .debug_selector(move || format!("diff-line-{index}"))
-                                .h(px(22.))
+                                .h(px(DIFF_ROW_HEIGHT))
+                                .pl(px(DIFF_GUTTER_WIDTH))
                                 .flex()
                                 .bg(theme.diff(*tone))
-                                .font_family(if cfg!(target_os = "macos") {
-                                    "Menlo"
-                                } else {
-                                    "monospace"
-                                })
+                                .font_family(DIFF_FONT)
                                 .text_size(px(13.))
-                                .child(
-                                    div()
-                                        .w(px(48.))
-                                        .flex_shrink_0()
-                                        .text_color(theme.muted)
-                                        .child(old.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(48.))
-                                        .flex_shrink_0()
-                                        .text_color(theme.muted)
-                                        .child(new.clone()),
-                                )
-                                .child(div().whitespace_nowrap().child(text.clone()))
+                                .child(row_selection.update(cx, |selection, cx| {
+                                    selection
+                                        .row(index, text.clone(), source.clone(), window, cx)
+                                        .debug_selector(move || format!("diff-source-{index}"))
+                                }))
                         })
                         .collect::<Vec<_>>()
                 })
                 .with_width_from_item(*widest)
+                .with_decoration(gutter)
                 .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
                 .size_full()
-                .into_any_element()
+                .into_any_element();
+                selection
+                    .update(cx, |selection, cx| selection.wrap(list, cx))
+                    .into_any_element()
             }
         }
     }

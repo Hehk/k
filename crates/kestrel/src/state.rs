@@ -50,6 +50,7 @@ pub enum ReadingMode {
 pub struct Browsing {
     pub file: Option<GitPath>,
     pub directory: Option<GitPath>,
+    #[serde(default)]
     pub mode: ReadingMode,
     pub first_visible_line: u32,
 }

@@ -8,7 +8,7 @@ impl Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(window, cx);
         div()
-            .id("tab-tooltip")
+            .id("tooltip")
             .debug_selector(|| format!("tooltip-{}", self.0))
             .max_w(px(400.))
             .px_2()

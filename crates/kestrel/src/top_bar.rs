@@ -1,11 +1,10 @@
 pub mod model;
 mod shortcuts;
 mod title;
-mod tooltip;
 
+use crate::controls::tooltip;
 pub use shortcuts::{TabAction, bind_keys};
 use title::{CLOSE_BUTTON_SPACE, TITLE_INSET, title};
-use tooltip::tooltip;
 
 #[cfg(test)]
 mod tests;

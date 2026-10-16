@@ -48,6 +48,7 @@ pub fn install(cx: &mut App) {
     cx.set_global(Installed::default());
     top_bar::bind_keys(cx);
     crate::text_input::bind_keys(cx);
+    crate::diff_selection::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-[", Command::Back, Some("Workspace")),
         KeyBinding::new("cmd-]", Command::Forward, Some("Workspace")),

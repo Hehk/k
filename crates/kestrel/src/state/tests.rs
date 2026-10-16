@@ -731,6 +731,40 @@ fn generated_transitions_preserve_selections_identities_and_serializability() {
 }
 
 #[test]
+fn experimental_expansion_saves_restore_without_losing_tabs_or_pins() {
+    let mut state = AppState::default();
+    let project = state
+        .register_project(&info("repo", "refs/heads/a"))
+        .unwrap();
+    let window = state.new_window().unwrap();
+    let tab = open(&mut state, project, window);
+    state.select_branch(tab, "refs/heads/a".into()).unwrap();
+    state
+        .set_comparison(tab, BaseSelection::Default, comparison("refs/heads/a"))
+        .unwrap();
+    state
+        .set_browsing(
+            tab,
+            &"refs/heads/a".into(),
+            Browsing {
+                file: Some("file.rs".into()),
+                first_visible_line: 42,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    state.go_home(tab).unwrap();
+    state.go_back(tab).unwrap();
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(json.contains("\"mode\":\"Diff\""));
+    for expansion in ["\"Collapsed\"", "\"All\"", "{\"Sections\":[0,24]}"] {
+        let experimental = json.replace("\"mode\":\"Diff\"", &format!("\"expansion\":{expansion}"));
+        let restored: AppState = serde_json::from_str(&experimental).unwrap();
+        assert_eq!(restored, state);
+    }
+}
+
+#[test]
 fn abbreviated_object_ids_cannot_enter_saved_comparisons() {
     assert!(serde_json::from_str::<ObjectId>("\"1234\"").is_err());
     assert!(

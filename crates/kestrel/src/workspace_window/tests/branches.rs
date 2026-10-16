@@ -52,10 +52,39 @@ impl Fixture {
         time: i64,
         text: &str,
     ) -> git2::Oid {
-        let mut tree = self.git.treebuilder(None).unwrap();
-        tree.insert("file.rs", self.git.blob(text.as_bytes()).unwrap(), 0o100644)
+        self.commit_files(reference, parent, time, &[("file.rs", text)])
+    }
+
+    fn commit_files(
+        &self,
+        reference: &str,
+        parent: Option<git2::Oid>,
+        time: i64,
+        files: &[(&str, &str)],
+    ) -> git2::Oid {
+        let mut index = git2::Index::new().unwrap();
+        for (path, text) in files {
+            index
+                .add(&git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode: 0o100644,
+                    uid: 0,
+                    gid: 0,
+                    file_size: 0,
+                    id: self.git.blob(text.as_bytes()).unwrap(),
+                    flags: 0,
+                    flags_extended: 0,
+                    path: path.as_bytes().to_vec(),
+                })
+                .unwrap();
+        }
+        let tree = self
+            .git
+            .find_tree(index.write_tree_to(&self.git).unwrap())
             .unwrap();
-        let tree = self.git.find_tree(tree.write().unwrap()).unwrap();
         let parent = parent.map(|id| self.git.find_commit(id).unwrap());
         let signature =
             git2::Signature::new("Test", "test@example.com", &git2::Time::new(time, 0)).unwrap();
@@ -110,7 +139,192 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 }
 
 #[gpui::test]
-fn large_diffs_stay_virtualized_across_redraws(cx: &mut TestAppContext) {
+fn nested_filenames_stay_visible_and_identical_names_select_distinct_files(
+    cx: &mut TestAppContext,
+) {
+    const FIRST: &str = "crates/kestrel/src/deeply/nested/first_module/mod.rs";
+    const SECOND: &str = "crates/kestrel/src/deeply/nested/second_module/mod.rs";
+    let fixture = Fixture::new();
+    let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
+    let head = fixture.commit_files(
+        "refs/heads/topic",
+        Some(main),
+        400,
+        &[
+            ("file.rs", "before\n"),
+            (FIRST, "first module\n"),
+            (SECOND, "second module\n"),
+            ("z.rs", "short name\n"),
+        ],
+    );
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    cx.simulate_resize(gpui::size(px(800.), px(600.)));
+    click(cx, "branch:refs/heads/topic");
+    for (row, name, directory, path) in [
+        ("changed-file-0", "file-name-0", "file-directory-0", FIRST),
+        ("changed-file-1", "file-name-1", "file-directory-1", SECOND),
+    ] {
+        let row_bounds = cx.debug_bounds(row).unwrap();
+        assert_eq!(row_bounds.size.width, px(250.));
+        let name_bounds = cx.debug_bounds(name).unwrap();
+        let directory_bounds = cx.debug_bounds(directory).unwrap();
+        assert!(name_bounds.size.width > px(40.));
+        assert!(name_bounds.size.height > px(0.));
+        assert!(name_bounds.left() >= row_bounds.left());
+        assert!(name_bounds.right() <= row_bounds.right());
+        assert!(name_bounds.bottom() <= directory_bounds.top());
+        assert!(directory_bounds.bottom() <= row_bounds.bottom());
+        click(cx, name);
+        workspace.read_with(cx, |workspace, _| {
+            let review = workspace
+                .state()
+                .tab(tab)
+                .unwrap()
+                .route
+                .review()
+                .unwrap()
+                .active_review()
+                .unwrap();
+            assert_eq!(review.browsing.file, Some(path.into()));
+            assert_eq!(
+                review.comparison.as_ref().unwrap().commits.new.to_string(),
+                head.to_string()
+            );
+        });
+    }
+    let short = cx.debug_bounds("changed-file-2").unwrap();
+    let long = cx.debug_bounds("changed-file-0").unwrap();
+    assert_eq!(short.left(), long.left());
+    assert_eq!(short.right(), long.right());
+    cx.simulate_click(
+        gpui::point(short.right() - px(2.), short.center().y),
+        Modifiers::none(),
+    );
+    redraw(cx);
+    assert_eq!(
+        cx.debug_bounds("changed-file-2").unwrap().size.width,
+        px(250.)
+    );
+    workspace.read_with(cx, |workspace, _| {
+        let review = workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .route
+            .review()
+            .unwrap()
+            .active_review()
+            .unwrap();
+        assert_eq!(review.browsing.file, Some("z.rs".into()));
+    });
+    let bounds = cx.debug_bounds("changed-file-0").unwrap();
+    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("tooltip-crates/kestrel/src/deeply/nested/first_module/mod.rs")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn diff_selection_copies_only_source_and_resets_on_file_changes(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
+    let source = "-keep\t a\u{301}😀\n\n++value\n";
+    fixture.commit_files(
+        "refs/heads/topic",
+        Some(main),
+        400,
+        &[("file.rs", source), ("other.rs", "other\n")],
+    );
+    let index = std::fs::read(fixture.git.path().join("index")).unwrap();
+    let (workspace, handle) = fixture.start(cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch:refs/heads/topic");
+    let state = workspace.read_with(cx, |workspace, _| workspace.state().clone());
+    let first = cx.debug_bounds("diff-line-2").unwrap();
+    let last = cx.debug_bounds("diff-line-4").unwrap();
+    let start = gpui::point(first.left() + px(1.), first.center().y);
+    let end = gpui::point(last.right() - px(1.), last.center().y);
+    for (from, to) in [(start, end), (end, start)] {
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
+        redraw(cx);
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::none());
+        redraw(cx);
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_keystrokes("cmd-c");
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                source.trim_end_matches('\n')
+            )
+        });
+    }
+    cx.simulate_click(start, Modifiers::none());
+    cx.simulate_click(
+        end,
+        Modifiers {
+            shift: true,
+            ..Modifiers::none()
+        },
+    );
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            source.trim_end_matches('\n')
+        )
+    });
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            format!("before\n{source}")
+        )
+    });
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace.state().clone()),
+        state
+    );
+    assert_eq!(
+        std::fs::read(fixture.git.path().join("index")).unwrap(),
+        index
+    );
+    cx.simulate_keystrokes("escape");
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into())));
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "unchanged"
+        )
+    });
+    cx.simulate_keystrokes("cmd-a");
+    click(cx, "changed-file-1");
+    click(cx, "diff-line-1");
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "unchanged"
+        )
+    });
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "other\n"));
+    cx.simulate_keystrokes("cmd-[");
+    redraw(cx);
+    click(cx, "branch-search");
+    cx.simulate_input("topic");
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "topic"));
+}
+
+#[gpui::test]
+fn large_diffs_keep_gutters_fixed_and_selection_virtualized(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
     let mut text = "added line\n".repeat(5000);
@@ -124,6 +338,99 @@ fn large_diffs_stay_virtualized_across_redraws(cx: &mut TestAppContext) {
         assert!(cx.debug_bounds("diff-line-1").unwrap().size.height > px(0.));
         assert!(cx.debug_bounds("diff-line-2500").is_none());
     }
+    click(cx, "diff-line-2");
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            format!("before\n{text}")
+        )
+    });
+    let row = cx.debug_bounds("diff-line-2").unwrap();
+    let position = gpui::point(row.left() + px(1.), row.center().y);
+    cx.simulate_mouse_down(position, gpui::MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2200.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    redraw(cx);
+    cx.simulate_mouse_up(position, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "added line\n".repeat(100)
+        )
+    });
+    assert!(cx.debug_bounds("diff-line-2500").is_none());
+    let gutter = cx.debug_bounds("diff-gutter-102").unwrap();
+    assert_eq!(gutter.size.width, px(108.));
+    let source = cx.debug_bounds("diff-source-102").unwrap();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(-500.), px(0.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    redraw(cx);
+    assert_eq!(cx.debug_bounds("diff-gutter-102").unwrap(), gutter);
+    assert_eq!(
+        cx.debug_bounds("diff-source-102").unwrap().left(),
+        source.left() - px(500.)
+    );
+    assert_eq!(
+        gutter.top(),
+        cx.debug_bounds("diff-line-102").unwrap().top()
+    );
+    let next = gpui::point(position.x, position.y + px(22.));
+    cx.simulate_mouse_down(position, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(next, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(next, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "added line\n"
+        )
+    });
+    let body = gpui::point(gutter.right() + px(1.), position.y);
+    let next = gpui::point(body.x, body.y + px(22.));
+    cx.simulate_mouse_down(body, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(next, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(next, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "\nadded line"
+        )
+    });
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: body,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-11.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    redraw(cx);
+    let shifted = cx.debug_bounds("diff-gutter-102").unwrap();
+    assert_eq!(shifted.left(), gutter.left());
+    assert_eq!(shifted.top(), gutter.top() - px(11.));
+    assert_eq!(
+        shifted.top(),
+        cx.debug_bounds("diff-line-102").unwrap().top()
+    );
+    cx.simulate_resize(gpui::size(px(800.), px(600.)));
+    redraw(cx);
+    let resized = cx.debug_bounds("diff-gutter-102").unwrap();
+    assert_eq!(resized.left(), gutter.left());
+    assert_eq!(
+        resized.top(),
+        cx.debug_bounds("diff-line-102").unwrap().top()
+    );
+    assert!(cx.debug_bounds("diff-line-2500").is_none());
 }
 
 #[gpui::test]
