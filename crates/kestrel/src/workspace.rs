@@ -39,7 +39,7 @@ impl LoadedWorkspace {
         let history_path = store
             .as_ref()
             .ok()
-            .map(|store| store.path().with_extension("history.bin"));
+            .map(|store| store.path().with_extension("history.jsonl"));
         let result = store.and_then(|mut store| {
             let loaded = store.load()?;
             Ok(Self {
@@ -72,13 +72,17 @@ impl LoadedWorkspace {
         // Workspace first, then reconcile the independently saved log by repository identity.
         // Either file can be newer or unavailable; neither load requires a cross-file transaction.
         if let Some(path) = history_path {
+            let legacy = path.with_extension("bin");
+            if !path.exists() && legacy.exists() {
+                loaded.add_notice(format!("Experimental binary history at {} was left untouched. This version starts a new JSON history journal.", legacy.display()));
+            }
             let mut store = history_storage::Store::new(path);
             match store.load(&mut loaded.state) {
                 Ok(history) => {
                     loaded.viewing_history = history.history;
-                    loaded.history_writer = Some(HistoryWriter { store, revision: 0, closed: false });
+                    loaded.history_writer = Some(HistoryWriter { store, closed: false });
                     if let Some(recovery) = history.recovery {
-                        loaded.add_notice(format!("Viewing history could not be restored: {}. Original preserved at {}.", recovery.reason, recovery.backup.display()));
+                        loaded.add_notice(format!("Viewing history was recovered through its last valid entry: {}. Original preserved at {}.", recovery.reason, recovery.backup.display()));
                     }
                 }
                 Err(error) => loaded.add_notice(format!("Viewing history could not be loaded: {error}. History saving is disabled; restart to retry.")),
@@ -115,18 +119,15 @@ impl Writer {
 
 struct HistoryWriter {
     store: history_storage::Store,
-    revision: u64,
     closed: bool,
 }
 
 impl HistoryWriter {
-    fn save(&mut self, revision: u64, records: &[Record]) -> Result<(), history_storage::Error> {
-        if self.closed || revision < self.revision {
+    fn save(&mut self, records: &[(u64, Record)]) -> Result<(), history_storage::Error> {
+        if self.closed {
             return Ok(());
         }
-        // Fence on attempted writes, including failures, just like the workspace writer.
-        self.revision = revision;
-        self.store.save(records)
+        self.store.append(records.iter().map(|(_, record)| record))
     }
 }
 
@@ -146,6 +147,7 @@ pub struct Workspace {
     history_writer: Option<Arc<Mutex<HistoryWriter>>>,
     revision: u64,
     save_task: Option<Task<()>>,
+    saving: bool,
     save_error: Option<String>,
     notice: Option<String>,
     quitting: bool,
@@ -188,6 +190,7 @@ impl Workspace {
                 .map(|writer| Arc::new(Mutex::new(writer))),
             revision: 0,
             save_task: None,
+            saving: false,
             save_error: None,
             notice: loaded.notice,
             quitting: false,
@@ -447,24 +450,36 @@ impl Workspace {
     pub fn save(&mut self, cx: &mut Context<Self>) {
         let writer = self.writer.clone();
         let history_writer = self.history_writer.clone();
-        if writer.is_none() && history_writer.is_none() {
+        // Debounce before capturing data. Once IO starts, keep that task alive: dropping an
+        // incremental batch like an obsolete whole-state snapshot could lose new record IDs.
+        if self.quitting || self.saving || (writer.is_none() && history_writer.is_none()) {
             return;
         }
-        let state = self.state.clone();
-        // TODO: Whole-log cloning on the UI thread grows with history, even for debounced saves.
-        // Measure this separately from background encoding before introducing incremental storage.
-        let records = self.viewing_history.records().to_vec();
-        let revision = self.revision;
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let result = cx
+            let Ok(Some((state, records, revision))) = this.update(cx, |this, _| {
+                if this.quitting {
+                    return None;
+                }
+                this.saving = true;
+                let records = if this.history_writer.is_some() {
+                    this.viewing_history.pending()
+                } else {
+                    Vec::new()
+                };
+                Some((this.state.clone(), records, this.revision))
+            }) else {
+                return;
+            };
+            let (records, history_saved, errors) = cx
                 .background_executor()
                 .spawn(async move {
                     let mut errors = Vec::new();
-                    // Independent files, not an atomic pair. Always attempt both writes, even
-                    // when one fails. Per-writer revision fences reject stale queued snapshots.
+                    let mut history_saved = false;
+                    // The files remain independent. Always attempt history even if workspace
+                    // saving fails; only one batch runs at a time, and failed changes stay dirty.
                     if let Some(writer) = writer {
                         let result = writer.lock().map_err(|error| error.to_string()).and_then(
                             |mut writer| {
@@ -479,33 +494,52 @@ impl Workspace {
                     }
                     if let Some(writer) = history_writer {
                         let result = writer.lock().map_err(|error| error.to_string()).and_then(
-                            |mut writer| {
-                                writer
-                                    .save(revision, &records)
-                                    .map_err(|error| error.to_string())
-                            },
+                            |mut writer| writer.save(&records).map_err(|error| error.to_string()),
                         );
-                        if let Err(error) = result {
-                            errors.push(format!("Viewing history: {error}"));
+                        match result {
+                            Ok(()) => history_saved = true,
+                            Err(error) => errors.push(format!("Viewing history: {error}")),
                         }
                     }
-                    if errors.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(errors.join("\n"))
-                    }
+                    (records, history_saved, errors)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.revision == revision && !this.quitting {
-                    this.save_error = result.err();
-                    cx.notify();
-                }
+                this.finish_save(revision, &records, history_saved, errors, cx);
             });
         }));
     }
 
+    fn finish_save(
+        &mut self,
+        revision: u64,
+        records: &[(u64, Record)],
+        history_saved: bool,
+        errors: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting {
+            return;
+        }
+        self.saving = false;
+        if history_saved {
+            self.viewing_history.acknowledge(records);
+        }
+        self.save_error = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("\n"))
+        };
+        if self.revision != revision {
+            self.save(cx);
+        }
+        cx.notify();
+    }
+
     fn flush_on_quit(&mut self) {
+        if self.quitting {
+            return;
+        }
         self.quitting = true;
         self.save_task.take();
         if let Some(writer) = &self.writer {
@@ -521,10 +555,14 @@ impl Workspace {
             }
         }
         if let Some(writer) = &self.history_writer {
+            // Unacknowledged in-flight records remain dirty. The lock orders this final batch
+            // after an append already running; closing fences one that has not started yet.
+            let records = self.viewing_history.pending();
             match writer.lock() {
                 Ok(mut writer) => {
-                    if let Err(error) = writer.save(self.revision, self.viewing_history.records()) {
-                        eprintln!("Could not save viewing history on quit: {error}");
+                    match writer.save(&records) {
+                        Ok(()) => self.viewing_history.acknowledge(&records),
+                        Err(error) => eprintln!("Could not save viewing history on quit: {error}"),
                     }
                     writer.closed = true;
                 }

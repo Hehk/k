@@ -1,10 +1,9 @@
 use std::{
-    fs,
-    io::Write,
+    fs::{self, OpenOptions},
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{Record, ViewingHistory};
@@ -13,37 +12,35 @@ use crate::{
     storage::Recovery,
 };
 
-mod v1;
-
 #[cfg(test)]
 mod tests;
 
-// Framing: magic[8], version:u32 LE, payload length:u64 LE, SHA-256[32], Postcard payload.
-// File v2 serializes Vec<Record> directly, in append order. IDs must match vector positions.
-// Stored project IDs are not trusted; repository identity replaces them on load.
-// Postcard serializes owned fields, never Rust layout. Enums use declaration-order tags;
-// integers/lengths use varints. Git paths/refs are bytes, object IDs are 40-byte hex strings,
-// and local paths use the existing tagged Unix-bytes/Windows-u16 codec.
-// Record and its nested application types form the v2 schema. Changing their serialized
-// form requires a new version and fixture/migration. V1 decoding is isolated in v1.rs.
-const MAGIC: &[u8; 8] = b"KSTRHIST";
-const VERSION: u32 = 2;
-const HEADER_LEN: usize = 52;
+// JSON Lines: a format/version header, then one application Record per line. A newline
+// commits a record; a later value with the same ID updates it without changing visit order.
+// Snapshot project IDs are reconciled by repository identity, never trusted across files.
+const HEADER: &[u8] = b"{\"format\":\"kestrel-viewing-history\",\"version\":1}\n";
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Encoding(#[from] postcard::Error),
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     State(#[from] StateError),
-    #[error("unsupported history version")]
+    #[error("unsupported history journal format or version")]
     Version,
-    #[error("invalid history framing or checksum")]
-    Integrity,
-    #[error("history must be loaded or safely recovered before saving")]
+    #[error("incomplete final journal line")]
+    Interrupted,
+    #[error("history journal changed outside its writer")]
+    Changed,
+    #[error("history must be loaded or safely recovered before appending")]
     NotLoaded,
+    #[error("append failed ({write}); rollback failed ({rollback}); restart to recover")]
+    Rollback {
+        write: String,
+        rollback: std::io::Error,
+    },
 }
 
 pub struct Loaded {
@@ -51,11 +48,13 @@ pub struct Loaded {
     pub recovery: Option<Recovery>,
 }
 
-/// Like workspace storage, this assumes one process owns a configuration directory.
-/// The application's revision fences are not cross-process locks.
+/// One process owns a configuration directory. The workspace serializes append attempts;
+/// the last synced offset lets a failed append roll back without rewriting earlier history.
 pub struct Store {
     path: PathBuf,
     loaded: bool,
+    offset: u64,
+    count: usize,
 }
 
 impl Store {
@@ -63,16 +62,21 @@ impl Store {
         Self {
             path,
             loaded: false,
+            offset: 0,
+            count: 0,
         }
     }
 
     pub fn load(&mut self, state: &mut AppState) -> Result<Loaded, Error> {
         self.loaded = false;
-        // TODO: Measure startup memory/latency before replacing this eager whole-log load.
+        // TODO: Replay eagerly for now. Long-lived journals may eventually need compaction
+        // of superseded values and streaming reads, not deletion of viewing records.
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.loaded = true;
+                self.offset = 0;
+                self.count = 0;
                 return Ok(Loaded {
                     history: ViewingHistory::default(),
                     recovery: None,
@@ -80,47 +84,142 @@ impl Store {
             }
             Err(error) => return Err(error.into()),
         };
-        let result = match decode(&bytes, state) {
-            Ok(history) => Loaded {
-                history,
-                recovery: None,
-            },
-            Err(error) => {
-                // Do not enable writes unless the original bytes have a durable recovery copy.
-                let mut backup = tempfile::Builder::new()
-                    .prefix("kestrel-history-recovery-")
-                    .suffix(".bin")
-                    .tempfile_in(self.directory())?;
-                backup.write_all(&bytes)?;
-                backup.as_file().sync_all()?;
-                let (_, backup) = backup.keep().map_err(|error| error.error)?;
-                self.sync_directory()?;
-                Loaded {
-                    history: ViewingHistory::default(),
-                    recovery: Some(Recovery {
-                        reason: error.to_string(),
-                        backup,
-                    }),
-                }
+        let mut records = Vec::new();
+        let mut valid = 0;
+        let replay = (|| -> Result<(), Error> {
+            if bytes.is_empty() {
+                return Err(Error::Interrupted);
             }
+            for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+                if !line.ends_with(b"\n") {
+                    return Err(Error::Interrupted);
+                }
+                if index == 0 {
+                    let header: serde_json::Value = serde_json::from_slice(line)?;
+                    if header.get("format").and_then(|value| value.as_str())
+                        != Some("kestrel-viewing-history")
+                        || header.get("version").and_then(|value| value.as_u64()) != Some(1)
+                    {
+                        return Err(Error::Version);
+                    }
+                } else {
+                    let record: Record = serde_json::from_slice(line)?;
+                    let id = check(&record, records.len())?;
+                    if id == records.len() {
+                        records.push(record);
+                    } else {
+                        records[id] = record;
+                    }
+                }
+                valid += line.len();
+            }
+            Ok(())
+        })();
+        // Publish the reconciled catalog only after replay and any recovery succeed.
+        let mut candidate = state.clone();
+        // TODO: Registration uses a linear project lookup; measure multi-repository startup
+        // before adding an index. Reconcile final records, not every journal amendment.
+        for record in &mut records {
+            record.viewed.snapshot = record.viewed.snapshot_for(&mut candidate)?;
+        }
+        let recovery = if let Err(error) = replay {
+            let mut backup = tempfile::Builder::new()
+                .prefix("kestrel-history-recovery-")
+                .suffix(".jsonl")
+                .tempfile_in(self.directory())?;
+            backup.write_all(&bytes)?;
+            backup.as_file().sync_all()?;
+            let (_, backup) = backup.keep().map_err(|error| error.error)?;
+            self.sync_directory()?;
+            // Preserve *all* original bytes before repairing the primary file to its valid
+            // prefix. Never append after a partial line, or skip corruption in the middle.
+            let mut repaired = tempfile::NamedTempFile::new_in(self.directory())?;
+            repaired.write_all(&bytes[..valid])?;
+            repaired.as_file().sync_all()?;
+            repaired.persist(&self.path).map_err(|error| error.error)?;
+            self.sync_directory()?;
+            Some(Recovery {
+                reason: error.to_string(),
+                backup,
+            })
+        } else {
+            None
         };
+        self.offset = valid as u64;
+        self.count = records.len();
         self.loaded = true;
-        Ok(result)
+        *state = candidate;
+        Ok(Loaded {
+            history: ViewingHistory {
+                records,
+                ..Default::default()
+            },
+            recovery,
+        })
     }
 
-    pub fn save(&mut self, records: &[Record]) -> Result<(), Error> {
+    pub fn append<'a>(
+        &mut self,
+        records: impl IntoIterator<Item = &'a Record>,
+    ) -> Result<(), Error> {
+        self.append_with(records, |file, bytes| file.write_all(bytes))
+    }
+
+    fn append_with<'a>(
+        &mut self,
+        records: impl IntoIterator<Item = &'a Record>,
+        write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), Error> {
         if !self.loaded {
             return Err(Error::NotLoaded);
         }
-        // TODO: Whole-log encoding and replacement cost O(history size) per save. Measure before
-        // introducing incremental writes; no retention cap or silent pruning substitutes for it.
-        let bytes = encode(records)?;
+        let mut bytes = Vec::new();
+        let mut count = self.count;
+        for record in records {
+            let id = check(record, count)?;
+            if id == count {
+                count += 1;
+            }
+            if bytes.is_empty() && self.offset == 0 {
+                bytes.extend_from_slice(HEADER);
+            }
+            serde_json::to_writer(&mut bytes, record)?;
+            bytes.push(b'\n');
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
         fs::create_dir_all(self.directory())?;
-        let mut file = tempfile::NamedTempFile::new_in(self.directory())?;
-        file.write_all(&bytes)?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|error| error.error)?;
-        self.sync_directory()?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.path)?;
+        if file.metadata()?.len() != self.offset {
+            return Err(Error::Changed);
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let result = (|| -> Result<(), std::io::Error> {
+            write(&mut file, &bytes)?;
+            file.sync_all()?;
+            if self.offset == 0 {
+                self.sync_directory()?;
+            }
+            Ok(())
+        })();
+        if let Err(write) = result {
+            if let Err(rollback) = file.set_len(self.offset).and_then(|()| file.sync_all()) {
+                self.loaded = false;
+                return Err(Error::Rollback {
+                    write: write.to_string(),
+                    rollback,
+                });
+            }
+            return Err(write.into());
+        }
+        self.offset += bytes.len() as u64;
+        self.count = count;
         Ok(())
     }
 
@@ -138,77 +237,18 @@ impl Store {
     }
 }
 
-fn encode(records: &[Record]) -> Result<Vec<u8>, Error> {
-    check(records)?;
-    frame(records)
-}
-
-fn check(records: &[Record]) -> Result<(), Error> {
-    for (index, record) in records.iter().enumerate() {
-        if record.id.0 != index as u64 {
-            return Err(StateError("history IDs must match append order").into());
-        }
-        let viewed = &record.viewed;
-        if viewed.snapshot.project().is_none() {
-            return Err(StateError("utility pages are not viewing records").into());
-        }
-        if !viewed.repository.directory.is_absolute() || !viewed.repository.common_dir.is_absolute()
-        {
-            return Err(StateError("history repository paths must be absolute").into());
-        }
-        viewed.snapshot.check()?;
+fn check(record: &Record, count: usize) -> Result<usize, Error> {
+    let id = usize::try_from(record.id.0).map_err(|_| StateError("history ID is too large"))?;
+    if id > count {
+        return Err(StateError("history IDs must not leave gaps").into());
     }
-    Ok(())
-}
-
-fn frame(records: &[Record]) -> Result<Vec<u8>, Error> {
-    let payload = postcard::to_stdvec(records)?;
-    let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&Sha256::digest(&payload));
-    bytes.extend_from_slice(&payload);
-    Ok(bytes)
-}
-
-fn decode(bytes: &[u8], state: &mut AppState) -> Result<ViewingHistory, Error> {
-    if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC {
-        return Err(Error::Integrity);
+    let viewed = &record.viewed;
+    if viewed.snapshot.project().is_none() {
+        return Err(StateError("utility pages are not viewing records").into());
     }
-    let version = if bytes[8..12] == VERSION.to_le_bytes() {
-        VERSION
-    } else if bytes[8..12] == 1u32.to_le_bytes() {
-        1
-    } else {
-        return Err(Error::Version);
-    };
-    let payload = &bytes[HEADER_LEN..];
-    if bytes[12..20] != (payload.len() as u64).to_le_bytes()
-        || bytes[20..HEADER_LEN] != Sha256::digest(payload)[..]
-    {
-        return Err(Error::Integrity);
+    if !viewed.repository.directory.is_absolute() || !viewed.repository.common_dir.is_absolute() {
+        return Err(StateError("history repository paths must be absolute").into());
     }
-    // A rejected record must not partly change the otherwise usable workspace catalog.
-    let mut candidate = state.clone();
-    let mut records = if version == 1 {
-        v1::decode(payload, &mut candidate)?
-    } else {
-        let (records, rest) = postcard::take_from_bytes::<Vec<Record>>(payload)?;
-        if !rest.is_empty() {
-            return Err(Error::Integrity);
-        }
-        records
-    };
-    check(&records)?;
-    // TODO: Registration repeats a linear project lookup per record. Measure many-repository
-    // loads before introducing a catalog index; the sizing fixture uses just one repository.
-    for record in &mut records {
-        record.viewed.snapshot = record.viewed.snapshot_for(&mut candidate)?;
-    }
-    *state = candidate;
-    Ok(ViewingHistory {
-        records,
-        ..Default::default()
-    })
+    viewed.snapshot.check()?;
+    Ok(id)
 }

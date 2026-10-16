@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -146,11 +146,36 @@ struct Binding {
 pub struct ViewingHistory {
     records: Vec<Record>,
     bindings: HashMap<TabId, Binding>,
+    dirty: BTreeMap<usize, u64>,
+    generation: u64,
 }
 
 impl ViewingHistory {
     pub fn records(&self) -> &[Record] {
         &self.records
+    }
+
+    /// Capture only changed records, in ID order so new IDs cannot leave gaps on disk.
+    pub fn pending(&self) -> Vec<(u64, Record)> {
+        self.dirty
+            .iter()
+            .map(|(&id, &generation)| (generation, self.records[id].clone()))
+            .collect()
+    }
+
+    /// An acknowledgement of an older value must not clear a change made during IO.
+    pub fn acknowledge(&mut self, saved: &[(u64, Record)]) {
+        for (generation, record) in saved {
+            let id = record.id.0 as usize;
+            if self.dirty.get(&id) == Some(generation) {
+                self.dirty.remove(&id);
+            }
+        }
+    }
+
+    fn mark_dirty(&mut self, id: usize) {
+        self.generation += 1;
+        self.dirty.insert(id, self.generation);
     }
 
     pub fn get(&self, id: ViewingId) -> Option<&Record> {
@@ -205,6 +230,7 @@ impl ViewingHistory {
                         let record = &mut self.records[id.0 as usize];
                         if record.viewed != viewed {
                             record.viewed = viewed;
+                            self.mark_dirty(id.0 as usize);
                             changed = true;
                         }
                     }
@@ -237,6 +263,7 @@ impl ViewingHistory {
             timestamp_ms,
             viewed,
         });
+        self.mark_dirty(id.0 as usize);
         self.bindings.insert(
             source.tab,
             Binding {
