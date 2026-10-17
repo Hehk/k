@@ -6,7 +6,7 @@ use gpui::{
 };
 use kestrel::{
     git::{Repository, RepositoryInfo},
-    state::{ProjectId, Route, StateError, Tab, TabId, WindowId},
+    state::{ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId},
 };
 
 use crate::{
@@ -316,13 +316,13 @@ impl Kestrel {
         Ok(())
     }
 
-    fn navigation_button(
+    pub(crate) fn navigation_button(
         &self,
         id: &'static str,
         label: &'static str,
         command: Command,
         theme: Theme,
-        cx: &Context<Self>,
+        cx: &App,
     ) -> impl IntoElement {
         let enabled = self.navigation_allowed(command, cx);
         enabled_control(id, label, enabled, theme).when(enabled, |this| {
@@ -537,6 +537,15 @@ impl Render for Kestrel {
         let theme = Theme::get(window, cx);
         let workspace = self.workspace.read(cx);
         let tab = self.active_tab(cx);
+        let comparison = tab.is_some_and(|tab| {
+            matches!(
+                tab.route,
+                Route::Repository {
+                    page: RepositoryPage::Comparison,
+                    ..
+                }
+            )
+        });
         let project = tab
             .and_then(|tab| tab.route.project())
             .and_then(|id| workspace.state().project(id).ok());
@@ -603,7 +612,7 @@ impl Render for Kestrel {
                         .min_h_0()
                         .mx_2()
                         .mb_2()
-                        .p_4()
+                        .p_2()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -611,29 +620,34 @@ impl Render for Kestrel {
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.paper)
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(self.navigation_button(
-                                    "navigate-back",
-                                    "Back",
-                                    Command::Back,
-                                    theme,
-                                    cx,
-                                ))
-                                .child(self.navigation_button(
-                                    "navigate-forward",
-                                    "Forward",
-                                    Command::Forward,
-                                    theme,
-                                    cx,
-                                )),
-                        )
-                        .child(div().text_lg().child(title))
-                        .when_some(directory.clone(), |this, directory| {
-                            this.child(div().text_sm().text_color(theme.muted).child(directory))
+                        .when(!comparison, |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(self.navigation_button(
+                                        "navigate-back",
+                                        "Back",
+                                        Command::Back,
+                                        theme,
+                                        cx,
+                                    ))
+                                    .child(self.navigation_button(
+                                        "navigate-forward",
+                                        "Forward",
+                                        Command::Forward,
+                                        theme,
+                                        cx,
+                                    )),
+                            )
                         })
+                        .when(!comparison, |this| this.child(div().text_lg().child(title)))
+                        .when_some(
+                            directory.clone().filter(|_| !comparison),
+                            |this, directory| {
+                                this.child(div().text_sm().text_color(theme.muted).child(directory))
+                            },
+                        )
                         .when(directory.is_some(), |this| match &self.repository {
                             RepositoryStatus::Loading => this.child("Opening repository…"),
                             RepositoryStatus::Ready => this
@@ -664,33 +678,20 @@ impl Render for Kestrel {
                         .when_some(self.error.clone(), |this, error| {
                             this.child(div().text_color(theme.error).child(error))
                         })
-                        .child(
-                            button(
-                                "open-repository",
-                                if self.opening.is_some() {
-                                    "Opening…"
-                                } else {
-                                    "Open repository…"
-                                },
-                                theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.prompt_repository(cx))),
-                        )
-                        .when(directory.is_some(), |this| {
-                            this.child(button("go-home", "Home", theme).on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(target) = this.open_target(cx) {
-                                        let result = this.workspace.update(cx, |workspace, cx| {
-                                            workspace.edit(|state| state.go_home(target.tab), cx)
-                                        });
-                                        this.error = result.err().map(|error| error.to_string());
-                                        cx.notify();
-                                    }
-                                },
-                            )))
-                        })
                         .when(directory.is_none(), |this| {
-                            this.children(recent.into_iter().map(|(id, title)| {
+                            this.child(
+                                button(
+                                    "open-repository",
+                                    if self.opening.is_some() {
+                                        "Opening…"
+                                    } else {
+                                        "Open repository…"
+                                    },
+                                    theme,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.prompt_repository(cx))),
+                            )
+                            .children(recent.into_iter().map(|(id, title)| {
                                 div()
                                     .id(("recent-project", id.as_u64()))
                                     .cursor_pointer()

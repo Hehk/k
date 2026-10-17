@@ -17,6 +17,7 @@ use kestrel::{
 
 use crate::{
     appearance::{DiffTone, Theme},
+    commands::Command,
     controls::{control, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{Load, RepositoryModel, branch_label, open},
@@ -538,7 +539,7 @@ impl ComparisonView {
         cx.notify();
     }
 
-    fn base_picker(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
+    fn base_picker(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let label = self
             .current_key(cx)
             .and_then(|key| {
@@ -553,7 +554,29 @@ impl ComparisonView {
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
+                    .when_some(
+                        window.root::<crate::workspace_window::Kestrel>().flatten(),
+                        |row, root| {
+                            let root = root.read(cx);
+                            row.child(root.navigation_button(
+                                "navigate-back",
+                                "Back",
+                                Command::Back,
+                                theme,
+                                cx,
+                            ))
+                            .child(root.navigation_button(
+                                "navigate-forward",
+                                "Forward",
+                                Command::Forward,
+                                theme,
+                                cx,
+                            ))
+                        },
+                    )
+                    .child(div().flex_1())
                     .child(control("choose-base", label, theme).on_click(cx.listener(
                         |this, _, _, cx| {
                             this.base_open = !this.base_open;
@@ -567,6 +590,17 @@ impl ComparisonView {
                                     .update(cx, |repository, cx| repository.refresh(cx))
                             }),
                         ),
+                    )
+                    .when(
+                        matches!(
+                            self.review,
+                            ReviewStatus::Ready(_) | ReviewStatus::Failed(_)
+                        ),
+                        |row| {
+                            row.child(control("latest-review", "Load latest", theme).on_click(
+                                cx.listener(|this, _, _, cx| this.load_review(None, true, cx)),
+                            ))
+                        },
                     ),
             )
             .when(self.base_open, |picker| {
@@ -622,7 +656,7 @@ impl Render for ComparisonView {
             .when_some(self.error.clone(), |panel, error| {
                 panel.child(div().text_color(theme.error).child(error))
             })
-            .child(self.base_picker(theme, cx));
+            .child(self.base_picker(theme, window, cx));
         panel = match &self.review {
             ReviewStatus::ChooseBase => {
                 panel.child("Choose a comparison base; no unambiguous repository default is known.")
@@ -633,10 +667,6 @@ impl Render for ComparisonView {
                 .child(
                     control("retry-review", "Retry pinned comparison", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.load_review(None, false, cx))),
-                )
-                .child(
-                    control("latest-review", "Load latest", theme)
-                        .on_click(cx.listener(|this, _, _, cx| this.load_review(None, true, cx))),
                 ),
             ReviewStatus::Ready(data) => {
                 let label = format!(
@@ -644,17 +674,57 @@ impl Render for ComparisonView {
                     &data.comparison.commits.old.to_string()[..8],
                     &data.comparison.commits.new.to_string()[..8]
                 );
-                panel.child(div().text_sm().child(label))
-                    .child(div().flex().gap_3().items_center()
-                        .when(!data.fresh, |row| row.child("Local refs have changed or disappeared. This comparison is pinned."))
-                        .child(control("latest-review", "Load latest", theme).on_click(cx.listener(|this, _, _, cx| this.load_review(None, true, cx)))))
-                    .when(data.changes.is_empty(), |panel| panel.child("No changed files."))
-                    .when(!data.changes.is_empty(), |panel| panel.child(div().flex().flex_1().min_h_0().gap_3()
-                        .child(uniform_list("changed-files", data.changes.len(), cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            let ReviewStatus::Ready(data) = &this.review else { return Vec::new(); };
-                            range.map(|index| this.file_row(index, &data.changes[index], theme, cx)).collect()
-                        })).w(px(250.)).h_full())
-                        .child(div().flex_1().min_w_0().h_full().child(self.file_preview(theme, cx)))))
+                panel
+                    .child(div().text_sm().child(label))
+                    .when(!data.fresh, |panel| {
+                        panel.child(
+                            "Local refs have changed or disappeared. This comparison is pinned.",
+                        )
+                    })
+                    .when(data.changes.is_empty(), |panel| {
+                        panel.child("No changed files.")
+                    })
+                    .when(!data.changes.is_empty(), |panel| {
+                        panel.child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .gap_3()
+                                .child(
+                                    uniform_list(
+                                        "changed-files",
+                                        data.changes.len(),
+                                        cx.processor(
+                                            move |this, range: std::ops::Range<usize>, _, cx| {
+                                                let ReviewStatus::Ready(data) = &this.review else {
+                                                    return Vec::new();
+                                                };
+                                                range
+                                                    .map(|index| {
+                                                        this.file_row(
+                                                            index,
+                                                            &data.changes[index],
+                                                            theme,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .collect()
+                                            },
+                                        ),
+                                    )
+                                    .w(px(250.))
+                                    .h_full(),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .child(self.file_preview(theme, cx)),
+                                ),
+                        )
+                    })
             }
         };
         panel.into_any_element()
