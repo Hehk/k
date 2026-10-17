@@ -139,6 +139,110 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 }
 
 #[gpui::test]
+fn restoring_windows_keeps_the_last_used_review_for_new_tabs(cx: &mut TestAppContext) {
+    use kestrel::{
+        state::{AppState, BaseSelection, Browsing},
+        storage::Store,
+    };
+
+    let fixture = Fixture::new();
+    let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
+    fixture.commit_files(
+        "refs/heads/topic",
+        Some(main),
+        400,
+        &[("file.rs", "topic\n"), ("second.rs", "second\n")],
+    );
+    let repository = Repository::open(fixture.git.workdir().unwrap()).unwrap();
+    let pinned = repository
+        .compare(
+            &"refs/heads/topic".into(),
+            &"refs/remotes/origin/main".into(),
+        )
+        .unwrap();
+    let other = repository
+        .change_base(&pinned, &"refs/heads/Alpha".into())
+        .unwrap();
+    let mut state = AppState::default();
+    let project = state.register_project(&repository.info().unwrap()).unwrap();
+    let first = state.new_window().unwrap();
+    let a = state.new_tab(first).unwrap();
+    state.open_project(project, a).unwrap();
+    state.select_branch(a, pinned.branch.clone()).unwrap();
+    state
+        .set_comparison(a, BaseSelection::Default, pinned.clone())
+        .unwrap();
+    state
+        .set_browsing(
+            a,
+            &pinned.branch,
+            Browsing {
+                file: Some("file.rs".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let second = state.new_window().unwrap();
+    let b = state.new_tab(second).unwrap();
+    state.open_project(project, b).unwrap();
+    state.select_branch(b, other.branch.clone()).unwrap();
+    state
+        .set_comparison(
+            b,
+            BaseSelection::Explicit(other.base.clone()),
+            other.clone(),
+        )
+        .unwrap();
+    state
+        .set_browsing(
+            b,
+            &other.branch,
+            Browsing {
+                file: Some("second.rs".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    state.new_tab(second).unwrap();
+    let path = fixture.dir.path().join("restored.json");
+    let mut store = Store::new(path.clone());
+    store.load().unwrap();
+    store.save(&state).unwrap();
+    let workspace = shared(cx, path);
+    let handle = cx.update(|cx| {
+        cx.set_global(crate::workspace::Session(workspace.clone()));
+        commands::install(cx);
+        let handle = Kestrel::open(workspace.clone(), first, cx).unwrap();
+        Kestrel::open(workspace.clone(), second, cx).unwrap();
+        handle
+    });
+    cx.run_until_parked();
+    let visual = &mut VisualTestContext::from_window(handle.into(), cx);
+    redraw(visual);
+    assert!(visual.debug_bounds("diff-line-1").is_some());
+    workspace.update(cx, |workspace, cx| {
+        assert_eq!(
+            workspace.state().project(project).unwrap(),
+            state.project(project).unwrap()
+        );
+        for tab in [a, b] {
+            assert_eq!(workspace.state().tab(tab).unwrap(), state.tab(tab).unwrap());
+        }
+        workspace
+            .edit(
+                |state| {
+                    let tab = state.new_tab(second)?;
+                    state.open_project(project, tab)?;
+                    assert_eq!(state.tab(tab)?.route.review(), state.tab(b)?.route.review());
+                    Ok(())
+                },
+                cx,
+            )
+            .unwrap();
+    });
+}
+
+#[gpui::test]
 fn nested_filenames_stay_visible_and_identical_names_select_distinct_files(
     cx: &mut TestAppContext,
 ) {

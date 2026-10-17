@@ -5,6 +5,19 @@ use tempfile::TempDir;
 
 use super::*;
 
+#[test]
+fn missing_branch_errors_use_readable_ref_names() {
+    let fixture = Fixture::new();
+    for (reference, label) in [
+        ("refs/heads/topic", "topic"),
+        ("refs/remotes/origin/topic", "origin/topic"),
+        ("refs/heads/修正", "修正"),
+    ] {
+        let error = fixture.reader().resolve(&reference.into()).unwrap_err();
+        assert_eq!(error.to_string(), format!("branch is unavailable: {label}"));
+    }
+}
+
 struct Fixture {
     directory: TempDir,
     repo: git2::Repository,

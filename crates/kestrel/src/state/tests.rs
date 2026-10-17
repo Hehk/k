@@ -37,6 +37,56 @@ fn assert_round_trip(state: &AppState) {
 }
 
 #[test]
+fn unchanged_restored_reviews_do_not_replace_the_remembered_context() {
+    let mut state = AppState::default();
+    let project = state
+        .register_project(&info("repo", "refs/heads/topic"))
+        .unwrap();
+    let window = state.new_window().unwrap();
+    let a = open(&mut state, project, window);
+    let pinned = comparison("refs/heads/topic");
+    state
+        .set_comparison(a, BaseSelection::Default, pinned.clone())
+        .unwrap();
+    let browsing = context(&state, a).reviews[0].browsing.clone();
+    let other = state.new_window().unwrap();
+    let b = open(&mut state, project, other);
+    let changed = Browsing {
+        file: Some("other.rs".into()),
+        ..browsing.clone()
+    };
+    state
+        .set_browsing(b, &pinned.branch, changed.clone())
+        .unwrap();
+    let before = state.clone();
+
+    let mut restored: AppState =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    restored
+        .set_comparison(a, BaseSelection::Default, pinned.clone())
+        .unwrap();
+    restored.set_browsing(a, &pinned.branch, browsing).unwrap();
+    assert_eq!(restored, before);
+    let c = open(&mut restored, project, other);
+    assert_eq!(context(&restored, c), context(&before, b));
+
+    restored.set_browsing(a, &pinned.branch, changed).unwrap();
+    assert_eq!(
+        &restored.project(project).unwrap().last_review,
+        context(&restored, a)
+    );
+    let mut latest = pinned.clone();
+    latest.commits.new = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse().unwrap();
+    restored
+        .set_comparison(a, BaseSelection::Default, latest.clone())
+        .unwrap();
+    assert_eq!(
+        restored.project(project).unwrap().last_review.reviews[0].comparison,
+        Some(latest)
+    );
+}
+
+#[test]
 fn new_tabs_are_home_routes_with_no_repository_side_effects() {
     let mut state = AppState::default();
     let window = state.new_window().unwrap();

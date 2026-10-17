@@ -460,8 +460,12 @@ impl AppState {
         let Route::Repository { review, .. } = &mut self.tab_mut(tab)?.route else {
             return Err(StateError("tab is not a repository route"));
         };
+        let previous = review.clone();
         change(review)?;
-        self.remember_tab(tab);
+        // Loading an unchanged pinned review is not a new user visit.
+        if *review != previous {
+            self.remember_tab(tab);
+        }
         Ok(())
     }
 

@@ -19,7 +19,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("expected a full local or remote-tracking branch ref")]
     InvalidRef,
-    #[error("branch is unavailable: {0:?}")]
+    #[error("branch is unavailable: {}", .0.label())]
     MissingRef(RefName),
     #[error("no common ancestor is available locally")]
     NoMergeBase,
