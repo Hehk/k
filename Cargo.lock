@@ -2878,6 +2878,7 @@ dependencies = [
  "dirs 5.0.1",
  "git2",
  "gpui",
+ "libc",
  "objc",
  "profiling",
  "serde",

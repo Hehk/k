@@ -1,12 +1,18 @@
 use super::*;
-use crate::workspace::{LoadedWorkspace, Workspace};
+use crate::{
+    appearance::DiffTone,
+    diff_selection::RowSource,
+    workspace::{LoadedWorkspace, Workspace},
+};
 use gpui::{Entity, TestAppContext};
 use kestrel::{
     git::RepositoryInfo,
-    review::{DiffSide, Endpoints, FileEntry, Hunk},
+    review::{DiffLine, DiffSide, Endpoints, FileEntry, FilePatch, Hunk, PreviewUnavailable},
     state::TabId,
     storage::Store,
 };
+
+mod structural;
 
 #[test]
 fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
@@ -136,32 +142,21 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
             ("10", "20", "keep λ  ", DiffTone::Context),
             ("11", "", "removed", DiffTone::Deleted),
             ("", "21", "added", DiffTone::Added),
-            (
-                "",
-                "",
-                "\\ No newline at end of file (Old)",
-                DiffTone::Metadata
-            ),
-            (
-                "",
-                "",
-                "\\ No newline at end of file (New)",
-                DiffTone::Metadata
-            ),
-            (
-                "",
-                "",
-                "\\ No newline at end of file (Both)",
-                DiffTone::Metadata
-            ),
+            ("", "", "No final newline · Before", DiffTone::Metadata),
+            ("", "", "No final newline · After", DiffTone::Metadata),
+            ("", "", "No final newline · Both", DiffTone::Metadata),
             ("", "", header.as_str(), DiffTone::Hunk),
             ("", "100", "tail", DiffTone::Added),
         ]
     );
-    assert_eq!(widest, Some(7));
+    assert_eq!(
+        widest,
+        Some(1),
+        "section labels must not widen the code viewport"
+    );
     assert_eq!(
         rows.iter().map(|row| row.marker).collect::<Vec<_>>(),
-        vec!["", " ", "-", "+", "", "", "", "", "+"]
+        ["", "", "−", "+", "", "", "", "", "+"]
     );
     assert_eq!(text.as_ref(), "keep λ  \nremoved\nadded\ntail");
     for row in rows.iter() {
@@ -264,6 +259,7 @@ fn setup(
     Entity<RepositoryModel>,
 ) {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
     let workspace = cx.new(|cx| {
         Workspace::new(
             LoadedWorkspace::load(Ok(Store::new(dir.path().join("state.json")))),
@@ -275,8 +271,8 @@ fn setup(
             .edit(
                 |state| {
                     let project = state.register_project(&RepositoryInfo {
-                        directory: dir.path().join("repo"),
-                        common_dir: dir.path().join("repo/.git"),
+                        directory: root.join("repo"),
+                        common_dir: root.join("repo/.git"),
                         current_branch: None,
                     })?;
                     let window = state.new_window()?;

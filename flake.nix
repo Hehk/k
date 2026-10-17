@@ -32,8 +32,9 @@
             exec /usr/bin/xcrun "$@"
           '';
         in {
-          default = pkgs.mkShell {
-            packages = [ toolchain pkgs.pkg-config pkgs.watchexec pkgs.babashka ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ hostXcrun ];
+          default = assert pkgs.difftastic.version == "0.71.0"; pkgs.mkShell {
+            KESTREL_DIFFTASTIC = "${pkgs.difftastic}/bin/difft";
+            packages = [ toolchain pkgs.pkg-config pkgs.watchexec pkgs.babashka pkgs.difftastic ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ hostXcrun ];
           };
         });
     };
