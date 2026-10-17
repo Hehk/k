@@ -149,6 +149,38 @@ fn scroll(cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>, dista
 }
 
 #[gpui::test]
+fn recent_escape_returns_to_branch_search_without_recording_a_view(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch-search");
+    let focus = cx.update(|window, cx| window.focused(cx).unwrap());
+    click(cx, "recently-viewed");
+    cx.simulate_keystrokes("down up escape");
+    redraw(cx);
+    cx.update(|window, _| assert!(focus.is_focused(window)));
+    cx.simulate_input("topic");
+    redraw(cx);
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.viewing_history().records().len(), 1);
+        assert_eq!(
+            workspace
+                .state()
+                .tab(tab)
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .snapshot
+                .view
+                .branches
+                .query,
+            "topic"
+        );
+    });
+}
+
+#[gpui::test]
 fn diff_scroll_is_saved_and_restored_after_navigation_and_restart(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
@@ -229,7 +261,9 @@ fn persisted_global_history_reopens_a_closed_source_after_restart(cx: &mut TestA
     });
     let saved = records.last().unwrap();
     assert_eq!(saved.viewed.snapshot.view.browsing.first_visible_line, 50);
-    let top = cx.debug_bounds("diff-line-51").unwrap().top();
+    // A stale-pin notice can move the viewport without changing the restored row.
+    let top = cx.debug_bounds("diff-line-51").unwrap().top()
+        - cx.debug_bounds("selectable-diff").unwrap().top();
     workspace.update(cx, |workspace, cx| {
         workspace
             .edit(
@@ -244,6 +278,12 @@ fn persisted_global_history_reopens_a_closed_source_after_restart(cx: &mut TestA
             .unwrap()
     });
     redraw(cx);
+    fixture.commit(
+        "refs/heads/topic",
+        Some(fixture.git.refname_to_id("refs/heads/topic").unwrap()),
+        600,
+        "newer content\n",
+    );
     cx.quit();
 
     let reloaded = shared(cx, fixture.dir.path().join("state.json"));
@@ -259,12 +299,15 @@ fn persisted_global_history_reopens_a_closed_source_after_restart(cx: &mut TestA
     let cx = &mut VisualTestContext::from_window(reopened.into(), cx);
     cx.update(|window, _| window.activate_window());
     redraw(cx);
-    reloaded.update(cx, |workspace, cx| {
+    click(cx, "recently-viewed");
+    reloaded.read_with(cx, |workspace, _| {
         assert_eq!(workspace.viewing_history().records(), records);
-        workspace
-            .open_view(saved.id, crate::workspace::OpenViewIn::NewTab(window), cx)
-            .unwrap();
+        assert_eq!(
+            workspace.viewing_history().recent(10).next().unwrap().id,
+            saved.id
+        );
     });
+    cx.simulate_keystrokes("cmd-enter");
     redraw(cx);
     reloaded.read_with(cx, |workspace, _| {
         assert_eq!(
@@ -292,7 +335,11 @@ fn persisted_global_history_reopens_a_closed_source_after_restart(cx: &mut TestA
             saved.viewed.snapshot
         );
     });
-    assert_eq!(cx.debug_bounds("diff-line-51").unwrap().top(), top);
+    assert_eq!(
+        cx.debug_bounds("diff-line-51").unwrap().top()
+            - cx.debug_bounds("selectable-diff").unwrap().top(),
+        top
+    );
 }
 
 #[gpui::test]
@@ -734,6 +781,22 @@ fn diff_selection_copies_only_source_and_resets_on_file_changes(cx: &mut TestApp
         workspace.read_with(cx, |workspace, _| workspace.state().clone()),
         state
     );
+    let viewings = workspace.read_with(cx, |workspace, _| {
+        workspace.viewing_history().records().len()
+    });
+    click(cx, "recently-viewed");
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-c");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            format!("before\n{source}")
+        )
+    });
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.viewing_history().records().len(), viewings)
+    });
     assert_eq!(
         std::fs::read(fixture.git.path().join("index")).unwrap(),
         index

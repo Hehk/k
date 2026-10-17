@@ -8,6 +8,7 @@ use kestrel::{
 use super::*;
 
 mod branches;
+mod recent;
 use crate::workspace::LoadedWorkspace;
 
 fn shared(cx: &mut TestAppContext, path: PathBuf) -> Entity<Workspace> {

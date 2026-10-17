@@ -37,6 +37,7 @@ pub struct Geometry {
     pub y: f32,
     pub width: f32,
     pub scroll: f32,
+    pub navigation_width: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,7 +51,7 @@ pub struct Layout {
 
 impl Layout {
     fn new(geometry: Geometry, count: usize) -> Self {
-        let pill_width = (geometry.width - SIDE_WIDTH * 2.).max(0.);
+        let pill_width = (geometry.width - SIDE_WIDTH * 2. - geometry.navigation_width).max(0.);
         let gaps = count.saturating_sub(1) as f32 * TAB_GAP;
         let tab_width =
             ((pill_width - PILL_PADDING * 2. - gaps) / count.max(1) as f32).max(MIN_TAB_WIDTH);
@@ -75,7 +76,7 @@ impl Layout {
         if self.count < 2 {
             return None;
         }
-        let x = x - self.geometry.x - SIDE_WIDTH;
+        let x = x - self.geometry.x - SIDE_WIDTH - self.geometry.navigation_width;
         let y = y - self.geometry.y;
         let top = (TITLEBAR_HEIGHT - TAB_HEIGHT) / 2.;
         if x < PILL_PADDING
@@ -122,6 +123,9 @@ pub enum Msg {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowCommand {
+    Back,
+    Forward,
+    RecentlyViewed,
     NewTab,
     LayoutChanged {
         tabs: Vec<TabId>,

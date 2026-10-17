@@ -42,7 +42,11 @@ impl Harness {
                         });
                     }
                     WindowCommand::Close => window.remove_window(),
-                    WindowCommand::NewTab | WindowCommand::LayoutChanged { .. } => {}
+                    WindowCommand::NewTab
+                    | WindowCommand::LayoutChanged { .. }
+                    | WindowCommand::Back
+                    | WindowCommand::Forward
+                    | WindowCommand::RecentlyViewed => {}
                 },
             ),
         ];

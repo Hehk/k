@@ -16,7 +16,6 @@ use kestrel::{
 
 use crate::{
     appearance::{DiffTone, Theme},
-    commands::Command,
     controls::{control, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{RepositoryModel, branch_label, open},
@@ -645,7 +644,7 @@ impl ComparisonView {
         cx.notify();
     }
 
-    fn base_picker(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn base_picker(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         let label = self
             .current_key(cx)
             .and_then(|key| {
@@ -662,26 +661,6 @@ impl ComparisonView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when_some(
-                        window.root::<crate::workspace_window::Kestrel>().flatten(),
-                        |row, root| {
-                            let root = root.read(cx);
-                            row.child(root.navigation_button(
-                                "navigate-back",
-                                "Back",
-                                Command::Back,
-                                theme,
-                                cx,
-                            ))
-                            .child(root.navigation_button(
-                                "navigate-forward",
-                                "Forward",
-                                Command::Forward,
-                                theme,
-                                cx,
-                            ))
-                        },
-                    )
                     .child(div().flex_1())
                     .child(control("choose-base", label, theme).on_click(cx.listener(
                         |this, _, _, cx| {
@@ -780,7 +759,7 @@ impl Render for ComparisonView {
             .when_some(self.error.clone(), |panel, error| {
                 panel.child(div().text_color(theme.error).child(error))
             })
-            .child(self.base_picker(theme, window, cx));
+            .child(self.base_picker(theme, cx));
         panel = match self.review.result() {
             QueryResult::Pending if !self.review.is_fetching() => {
                 panel.child("Choose a comparison base; no unambiguous repository default is known.")

@@ -1,8 +1,11 @@
 pub mod model;
+mod navigation;
 mod shortcuts;
 mod title;
 
 use crate::controls::tooltip;
+use navigation::NAVIGATION_WIDTH;
+pub use navigation::NavigationState;
 pub use shortcuts::{TabAction, bind_keys};
 use title::{CLOSE_BUTTON_SPACE, TITLE_INSET, title};
 
@@ -55,6 +58,7 @@ impl Render for DragPreview {
 pub struct TopBar {
     model: Model,
     managed: bool,
+    navigation: NavigationState,
     scroll: ScrollHandle,
     focus: FocusHandle,
     previous_focus: Option<WeakFocusHandle>,
@@ -92,6 +96,7 @@ impl TopBar {
         let mut bar = Self {
             model,
             managed,
+            navigation: NavigationState::default(),
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             previous_focus: None,
@@ -99,6 +104,7 @@ impl TopBar {
         bar.dispatch(
             Msg::LayoutChanged(Geometry {
                 width: window.viewport_size().width.into(),
+                navigation_width: if managed { NAVIGATION_WIDTH } else { 0. },
                 ..Geometry::default()
             }),
             window,
@@ -436,6 +442,7 @@ impl Render for TopBar {
                         y: event.bounds.origin.y.into(),
                         width: event.bounds.size.width.into(),
                         scroll: this.scroll.offset().x.into(),
+                        navigation_width: this.model.geometry().navigation_width,
                     };
                     if this.model.geometry() != geometry {
                         this.dispatch(Msg::LayoutChanged(geometry), window, cx);
@@ -472,6 +479,7 @@ impl Render for TopBar {
                             y: bounds.origin.y.into(),
                             width: bounds.size.width.into(),
                             scroll: scroll.offset().x.into(),
+                            navigation_width: geometry.navigation_width,
                         };
                         if geometry != measured {
                             window.defer(cx, move |window, cx| {
@@ -494,6 +502,9 @@ impl Render for TopBar {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
+            .when(self.managed, |bar| {
+                bar.child(self.render_navigation(theme, cx))
+            })
             .child(
                 div()
                     .flex_1()

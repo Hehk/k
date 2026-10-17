@@ -116,6 +116,7 @@ fn zero_window_commands_and_menu_enablement(cx: &mut TestAppContext) {
             "Minimize",
             "Back",
             "Forward",
+            "Recently Viewed",
         ] {
             assert!(
                 !states
@@ -431,6 +432,7 @@ fn menus_and_commands_are_guarded_during_a_tab_drag(cx: &mut TestAppContext) {
             "Move Tab to New Window",
             "Back",
             "Forward",
+            "Recently Viewed",
         ] {
             assert!(
                 !states
@@ -484,6 +486,7 @@ fn menus_expose_the_expected_commands_once() {
     for name in [
         "Back",
         "Forward",
+        "Recently Viewed",
         "New Window",
         "New Tab",
         "Close Tab",

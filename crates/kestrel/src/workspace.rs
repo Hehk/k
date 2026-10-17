@@ -131,10 +131,6 @@ impl HistoryWriter {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by the later history UI layer")
-)]
 pub enum OpenViewIn {
     Tab(TabId),
     NewTab(WindowId),
@@ -245,18 +241,10 @@ impl Workspace {
         &self.state
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Consumed by the later history UI layer")
-    )]
     pub fn viewing_history(&self) -> &ViewingHistory {
         &self.viewing_history
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Consumed by the later history UI layer")
-    )]
     pub fn open_view(
         &mut self,
         id: ViewingId,
