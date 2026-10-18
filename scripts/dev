@@ -1,0 +1,52 @@
+#!/usr/bin/env bb
+(require '[babashka.process :as process]
+         '[cheshire.core :as json]
+         '[clojure.java.io :as io])
+
+(def app (atom nil))
+(def process-options {:inherit true :shutdown process/destroy-tree})
+
+(defn stop-app! []
+  (when-let [running @app]
+    (process/destroy-tree running)
+    @running
+    (reset! app nil)))
+
+(defn rebuild! []
+  ;; Leave the running app alone until its replacement builds successfully.
+  (when (zero? (:exit @(process/process ["cargo" "build" "--package" "kestrel" "--bin" "kestrel"]
+                                       process-options)))
+    (stop-app!)
+    (reset! app (process/process [(str (io/file (or (System/getenv "CARGO_TARGET_DIR") "target")
+                                               "debug" "kestrel"))]
+                                process-options))))
+
+(defn file-event? [line]
+  (some #(= "path" (:kind %)) (:tags (json/parse-string line true))))
+
+(def watcher
+  (process/process
+   ["watchexec" "--only-emit-events" "--emit-events-to" "json-stdio"
+    "--postpone" "--debounce" "300ms"
+    "--watch" "crates" "--watch-non-recursive" "."
+    "--filter" "**/*.rs" "--filter" "**/Cargo.toml"
+    "--filter" "Cargo.lock" "--filter" "rust-toolchain.toml"]
+   {:err :inherit :shutdown process/destroy-tree}))
+
+(try
+  (rebuild!)
+  (with-open [events (io/reader (:out watcher))]
+    (loop []
+      (when-let [line (.readLine events)]
+        ;; Coalesce the batch, including edits queued during the previous build.
+        (let [changed? (loop [changed? (boolean (file-event? line))]
+                         (if (.ready events)
+                           (if-let [next-line (.readLine events)]
+                             (recur (or changed? (boolean (file-event? next-line))))
+                             changed?)
+                           changed?))]
+          (when changed? (rebuild!)))
+        (recur))))
+  (finally
+    (process/destroy-tree watcher)
+    (stop-app!)))

@@ -33,7 +33,7 @@
           '';
         in {
           default = pkgs.mkShell {
-            packages = [ toolchain pkgs.pkg-config ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ hostXcrun ];
+            packages = [ toolchain pkgs.pkg-config pkgs.watchexec pkgs.babashka ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ hostXcrun ];
           };
         });
     };

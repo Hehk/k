@@ -22,11 +22,3 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
-
-Enable the version-controlled pre-commit hook once per clone:
-
-```sh
-git config --local core.hooksPath .githooks
-```
-
-Commit from the dev environment. The hook checks formatting, Clippy, and tests, stopping on the first failure. It checks the working tree, including unstaged changes, without modifying files.
