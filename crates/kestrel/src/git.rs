@@ -311,17 +311,33 @@ impl Repository {
         }
     }
 
-    pub fn patch(&self, change: &FileChange, limits: PreviewLimits) -> Result<FilePatch, Error> {
+    pub fn contents(
+        &self,
+        change: &FileChange,
+        limits: PreviewLimits,
+    ) -> Result<(FileContent, FileContent), Error> {
         let text = |entry: Option<&FileEntry>| match entry {
             Some(entry) => self.content(entry, limits),
             None => Ok(FileContent::Text(String::new())),
         };
-        let (old, new) = match (text(change.old_file())?, text(change.new_file())?) {
-            (FileContent::Text(old), FileContent::Text(new)) => (old, new),
-            (FileContent::Unavailable(reason), _) | (_, FileContent::Unavailable(reason)) => {
-                return Ok(FilePatch::Unavailable(reason));
+        Ok((text(change.old_file())?, text(change.new_file())?))
+    }
+
+    pub fn patch(&self, change: &FileChange, limits: PreviewLimits) -> Result<FilePatch, Error> {
+        match self.contents(change, limits)? {
+            (FileContent::Text(old), FileContent::Text(new)) => {
+                Self::text_patch(&old, &new, limits)
             }
-        };
+            (FileContent::Unavailable(reason), _) | (_, FileContent::Unavailable(reason)) => {
+                Ok(FilePatch::Unavailable(reason))
+            }
+        }
+    }
+
+    pub fn text_patch(old: &str, new: &str, limits: PreviewLimits) -> Result<FilePatch, Error> {
+        if old.len() > limits.blob_bytes || new.len() > limits.blob_bytes {
+            return Ok(FilePatch::Unavailable(PreviewUnavailable::TooLarge));
+        }
         // Buffer diffs avoid reading checkout attributes or executing configured drivers.
         let patch = git2::Patch::from_buffers(
             old.as_bytes(),

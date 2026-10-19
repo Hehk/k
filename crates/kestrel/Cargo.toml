@@ -12,6 +12,7 @@ frame-metrics = []
 dirs.workspace = true
 gpui.workspace = true
 git2.workspace = true
+diff = { path = "../diff" }
 profiling = { version = "1", features = ["profile-with-tracing"] }
 serde.workspace = true
 serde_json.workspace = true

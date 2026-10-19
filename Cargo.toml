@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kestrel"]
+members = ["crates/kestrel", "crates/diff"]
 default-members = ["crates/kestrel"]
 
 [workspace.package]

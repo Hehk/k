@@ -8,6 +8,8 @@ use kestrel::{
     storage::Store,
 };
 
+mod structural;
+
 #[test]
 fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
     let entry = |path: GitPath| FileEntry {
@@ -264,6 +266,7 @@ fn setup(
     Entity<RepositoryModel>,
 ) {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
     let workspace = cx.new(|cx| {
         Workspace::new(
             LoadedWorkspace::load(Ok(Store::new(dir.path().join("state.json")))),
@@ -275,8 +278,8 @@ fn setup(
             .edit(
                 |state| {
                     let project = state.register_project(&RepositoryInfo {
-                        directory: dir.path().join("repo"),
-                        common_dir: dir.path().join("repo/.git"),
+                        directory: root.join("repo"),
+                        common_dir: root.join("repo/.git"),
                         current_branch: None,
                     })?;
                     let window = state.new_window()?;

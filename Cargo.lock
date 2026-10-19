@@ -1296,6 +1296,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2875,6 +2886,7 @@ name = "kestrel"
 version = "0.1.0"
 dependencies = [
  "block",
+ "diff",
  "dirs 5.0.1",
  "git2",
  "gpui",

@@ -3,15 +3,13 @@
 
 use std::sync::Arc;
 
+use diff::{Cancellation, Engine};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window, div, prelude::*, px,
     uniform_list,
 };
 use kestrel::{
-    review::{
-        Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewLimits, PreviewUnavailable,
-        RefName,
-    },
+    review::{Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewUnavailable, RefName},
     state::{BaseSelection, Browsing, RepositoryPage, Route},
 };
 
@@ -24,6 +22,8 @@ use crate::{
 };
 
 mod gutter;
+mod patch;
+use patch::LoadedPatch;
 
 const DIFF_NUMBER_WIDTH: f32 = 48.;
 const DIFF_MARKER_WIDTH: f32 = 12.;
@@ -34,6 +34,17 @@ const DIFF_FONT: &str = if cfg!(target_os = "macos") {
     "monospace"
 };
 
+struct PendingPatch {
+    _task: Task<()>,
+    cancellation: Cancellation,
+}
+
+impl Drop for PendingPatch {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
 pub struct ComparisonView {
     repository: Entity<RepositoryModel>,
     focus: FocusHandle,
@@ -43,8 +54,9 @@ pub struct ComparisonView {
     review_task: Option<Task<()>>,
     review_revision: u64,
     patch_key: Option<FileChange>,
-    patch: Load<PreparedPatch>,
-    patch_task: Option<Task<()>>,
+    patch: Load<LoadedPatch>,
+    patch_task: Option<PendingPatch>,
+    engine: Arc<Engine>,
     patch_revision: u64,
     selection: Option<(Entity<DiffSelection>, [Subscription; 2])>,
     error: Option<String>,
@@ -253,6 +265,7 @@ impl ComparisonView {
             patch_key: None,
             patch: Load::Loading,
             patch_task: None,
+            engine: Arc::new(Engine::bundled()),
             patch_revision: 0,
             selection: None,
             error: None,
@@ -466,41 +479,60 @@ impl ComparisonView {
         let project = self.repository.read(cx).project().clone();
         let revision = self.patch_revision;
         let selected_file = path(&change).clone();
-        self.patch_task = Some(cx.spawn(async move |this, cx| {
+        let cancellation = Cancellation::default();
+        let request_cancellation = cancellation.clone();
+        let engine = self.engine.clone();
+        let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    open(&project)?
-                        .patch(&change, PreviewLimits::default())
-                        .map(PreparedPatch::new)
-                        .map_err(|error| error.to_string())
+                    LoadedPatch::load(&open(&project)?, &change, &engine, &request_cancellation)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.patch_matches(revision, &key, &selected_file, cx) {
-                    return;
-                }
-                if let Ok(PreparedPatch::Rows { text, .. }) = &result {
-                    let selection =
-                        cx.new(|cx| DiffSelection::new(text.clone(), px(DIFF_GUTTER_WIDTH), cx));
-                    let observe = cx.observe(&selection, |_, _, cx| cx.notify());
-                    let copy =
-                        cx.subscribe(&selection, move |this, _, event: &CopySelection, cx| {
-                            if this.patch_matches(revision, &key, &selected_file, cx) {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    event.0.clone(),
-                                ));
-                            }
-                        });
-                    this.selection = Some((selection, [observe, copy]));
-                }
-                this.patch = match result {
-                    Ok(patch) => Load::Ready(patch),
-                    Err(error) => Load::Failed(error),
-                };
-                cx.notify();
+                this.finish_patch(revision, &key, &selected_file, result, cx);
             });
-        }));
+        });
+        self.patch_task = Some(PendingPatch {
+            _task: task,
+            cancellation,
+        });
+    }
+
+    fn finish_patch(
+        &mut self,
+        revision: u64,
+        key: &ReviewKey,
+        selected_file: &GitPath,
+        result: Result<LoadedPatch, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.patch_matches(revision, key, selected_file, cx) {
+            return;
+        }
+        self.selection = None;
+        if let Ok(LoadedPatch {
+            content: PreparedPatch::Rows { text, .. },
+            ..
+        }) = &result
+        {
+            let selection =
+                cx.new(|cx| DiffSelection::new(text.clone(), px(DIFF_GUTTER_WIDTH), cx));
+            let observe = cx.observe(&selection, |_, _, cx| cx.notify());
+            let key = key.clone();
+            let selected_file = selected_file.clone();
+            let copy = cx.subscribe(&selection, move |this, _, event: &CopySelection, cx| {
+                if this.patch_matches(revision, &key, &selected_file, cx) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(event.0.clone()));
+                }
+            });
+            self.selection = Some((selection, [observe, copy]));
+        }
+        self.patch = match result {
+            Ok(patch) => Load::Ready(patch),
+            Err(error) => Load::Failed(error),
+        };
+        cx.notify();
     }
 
     fn patch_matches(&self, revision: u64, key: &ReviewKey, file: &GitPath, cx: &App) -> bool {
@@ -826,7 +858,20 @@ impl ComparisonView {
                     .new_file()
                     .map_or_else(|| "—".into(), |file| format!("{:o}", file.mode));
                 panel
-                    .child(div().text_sm().child(path(change).label()))
+                    .child(
+                        div()
+                            .id("diff-file-title")
+                            .debug_selector(|| "diff-file-title".into())
+                            .text_sm()
+                            .child(path(change).label())
+                            .when_some(
+                                match &self.patch {
+                                    Load::Ready(patch) => Some(patch.status.clone()),
+                                    _ => None,
+                                },
+                                |title, status| title.tooltip(tooltip(status)),
+                            ),
+                    )
                     .when(old != new, |panel| {
                         panel.child(div().text_sm().child(format!("Mode: {old} → {new}")))
                     })
@@ -848,7 +893,10 @@ impl ComparisonView {
                     )),
                 )
                 .into_any_element(),
-            Load::Ready(PreparedPatch::Unavailable(reason)) => {
+            Load::Ready(LoadedPatch {
+                content: PreparedPatch::Unavailable(reason),
+                ..
+            }) => {
                 use kestrel::review::PreviewUnavailable::*;
                 div()
                     .child(match reason {
@@ -860,10 +908,16 @@ impl ComparisonView {
                     })
                     .into_any_element()
             }
-            Load::Ready(PreparedPatch::Rows { rows, .. }) if rows.is_empty() => div()
+            Load::Ready(LoadedPatch {
+                content: PreparedPatch::Rows { rows, .. },
+                ..
+            }) if rows.is_empty() => div()
                 .child("No text changes (metadata or mode change).")
                 .into_any_element(),
-            Load::Ready(PreparedPatch::Rows { rows, widest, .. }) => {
+            Load::Ready(LoadedPatch {
+                content: PreparedPatch::Rows { rows, widest, .. },
+                ..
+            }) => {
                 let rows = Arc::clone(rows);
                 let selection = self
                     .selection
