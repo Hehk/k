@@ -51,7 +51,7 @@ pub struct ComparisonView {
     focus: FocusHandle,
     base_open: bool,
     review_key: Option<ReviewKey>,
-    review: ReviewStatus,
+    review: Query<ReviewData>,
     review_task: Option<Task<()>>,
     review_revision: u64,
     patch_key: Option<FileChange>,
@@ -81,13 +81,6 @@ struct ReviewData {
     comparison: Comparison,
     changes: Vec<FileChange>,
     fresh: bool,
-}
-
-enum ReviewStatus {
-    ChooseBase,
-    Loading,
-    Ready(ReviewData),
-    Failed(String),
 }
 
 struct DiffRow {
@@ -260,7 +253,7 @@ impl ComparisonView {
             focus: cx.focus_handle(),
             base_open: false,
             review_key: None,
-            review: ReviewStatus::ChooseBase,
+            review: Query::new(),
             review_task: None,
             review_revision: 0,
             patch_key: None,
@@ -288,7 +281,7 @@ impl ComparisonView {
             self.patch_key = None;
             self.review_key = key;
             self.base_open = false;
-            self.review = ReviewStatus::ChooseBase;
+            self.review = Query::new();
             if self.review_key.is_some() {
                 self.load_review(None, false, cx);
             }
@@ -316,7 +309,7 @@ impl ComparisonView {
 
     fn refresh_review(&mut self, cx: &mut Context<Self>) {
         if let Some(snapshot) = self.repository.read(cx).snapshot().data()
-            && let ReviewStatus::Ready(data) = &mut self.review
+            && let Some(data) = self.review.data_mut()
         {
             data.fresh = snapshot.branches.iter().any(|branch| {
                 branch.name == data.comparison.branch && branch.tip == data.comparison.commits.new
@@ -324,7 +317,7 @@ impl ComparisonView {
                 branch.name == data.comparison.base && branch.tip == data.comparison.base_tip
             });
         }
-        if self.review_key.is_some() && matches!(self.review, ReviewStatus::ChooseBase) {
+        if self.review_key.is_some() && self.review.is_pending() && !self.review.is_fetching() {
             self.load_review(None, false, cx);
         }
     }
@@ -352,7 +345,7 @@ impl ComparisonView {
                 .and_then(|snapshot| snapshot.default_base.clone()),
         };
         if key.comparison.is_none() && reference.is_none() {
-            self.review = ReviewStatus::ChooseBase;
+            self.review = Query::new();
             cx.notify();
             return;
         }
@@ -363,7 +356,8 @@ impl ComparisonView {
         self.patch = Query::new();
         self.selection = None;
         self.patch_key = None;
-        self.review = ReviewStatus::Loading;
+        self.review = Query::new();
+        self.review.start();
         let project = self.repository.read(cx).project().clone();
         let request = key.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
@@ -425,18 +419,18 @@ impl ComparisonView {
                     )
                 });
                 if let Err(error) = result {
-                    self.review = ReviewStatus::Failed(error.to_string());
+                    self.review.complete(Err(error.to_string()));
                 } else {
                     self.review_key = Some(ReviewKey {
                         branch: comparison.branch.clone(),
                         base,
                         comparison: Some(comparison),
                     });
-                    self.review = ReviewStatus::Ready(data);
+                    self.review.complete(Ok(data));
                     self.load_patch(cx);
                 }
             }
-            Err(error) => self.review = ReviewStatus::Failed(error),
+            Err(error) => self.review.complete(Err(error)),
         }
         cx.notify();
     }
@@ -445,7 +439,7 @@ impl ComparisonView {
         let Some(key) = self.current_key(cx) else {
             return;
         };
-        let ReviewStatus::Ready(data) = &self.review else {
+        let Some(data) = self.review.data() else {
             return;
         };
         if key.comparison.as_ref() != Some(&data.comparison) {
@@ -626,17 +620,11 @@ impl ComparisonView {
                             }),
                         ),
                     )
-                    .when(
-                        matches!(
-                            self.review,
-                            ReviewStatus::Ready(_) | ReviewStatus::Failed(_)
-                        ),
-                        |row| {
-                            row.child(control("latest-review", "Load latest", theme).on_click(
-                                cx.listener(|this, _, _, cx| this.load_review(None, true, cx)),
-                            ))
-                        },
-                    ),
+                    .when(!self.review.is_pending(), |row| {
+                        row.child(control("latest-review", "Load latest", theme).on_click(
+                            cx.listener(|this, _, _, cx| this.load_review(None, true, cx)),
+                        ))
+                    }),
             )
             .when(
                 self.repository.read(cx).snapshot().is_refreshing(),
@@ -711,18 +699,18 @@ impl Render for ComparisonView {
                 panel.child(div().text_color(theme.error).child(error))
             })
             .child(self.base_picker(theme, window, cx));
-        panel = match &self.review {
-            ReviewStatus::ChooseBase => {
+        panel = match self.review.result() {
+            QueryResult::Pending if !self.review.is_fetching() => {
                 panel.child("Choose a comparison base; no unambiguous repository default is known.")
             }
-            ReviewStatus::Loading => panel.child("Loading comparison…"),
-            ReviewStatus::Failed(error) => panel
+            QueryResult::Pending => panel.child("Loading comparison…"),
+            QueryResult::Error { error, .. } => panel
                 .child(div().text_color(theme.error).child(error.clone()))
                 .child(
                     control("retry-review", "Retry pinned comparison", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.load_review(None, false, cx))),
                 ),
-            ReviewStatus::Ready(data) => {
+            QueryResult::Success(data) => {
                 let label = format!(
                     "{} → {} · Changes since merge base",
                     &data.comparison.commits.old.to_string()[..8],
@@ -751,7 +739,7 @@ impl Render for ComparisonView {
                                         data.changes.len(),
                                         cx.processor(
                                             move |this, range: std::ops::Range<usize>, _, cx| {
-                                                let ReviewStatus::Ready(data) = &this.review else {
+                                                let Some(data) = this.review.data() else {
                                                     return Vec::new();
                                                 };
                                                 range

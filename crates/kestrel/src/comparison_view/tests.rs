@@ -400,6 +400,59 @@ fn only_the_latest_base_request_can_complete_even_for_the_same_route(cx: &mut Te
 }
 
 #[gpui::test]
+fn comparison_query_waits_for_a_base_and_resets_for_new_requests(cx: &mut TestAppContext) {
+    let (_dir, workspace, tab, repository) = setup(cx);
+    let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));
+    view.update(cx, |view, cx| {
+        assert!(view.review.is_pending());
+        assert!(!view.review.is_fetching());
+        view.load_review(Some("refs/heads/main".into()), false, cx);
+        assert!(view.review.is_loading());
+        let key = view.current_key(cx).unwrap();
+        view.finish_review(
+            view.review_revision,
+            key.clone(),
+            BaseSelection::Explicit("refs/heads/main".into()),
+            Err("comparison unavailable".into()),
+            cx,
+        );
+        assert_eq!(view.review.error(), Some("comparison unavailable"));
+        assert!(!view.review.is_fetching());
+
+        view.load_review(Some("refs/heads/main".into()), false, cx);
+        assert!(view.review.is_loading());
+        assert!(view.review.error().is_none());
+        view.finish_review(
+            view.review_revision,
+            key,
+            BaseSelection::Explicit("refs/heads/main".into()),
+            Ok(data("refs/heads/main")),
+            cx,
+        );
+        assert!(view.review.data().is_some());
+        assert!(!view.review.is_fetching());
+
+        view.load_review(Some("refs/heads/other-base".into()), false, cx);
+        assert!(view.review.is_loading());
+        assert!(view.review.data().is_none());
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| state.select_branch(tab, "refs/heads/other".into()),
+                cx,
+            )
+            .unwrap();
+    });
+    view.update(cx, |view, cx| {
+        view.synchronize(cx);
+        assert!(view.review.is_pending());
+        assert!(!view.review.is_fetching());
+        assert!(view.review.data().is_none());
+    });
+}
+
+#[gpui::test]
 fn patch_queries_reset_on_retry_and_file_changes(cx: &mut TestAppContext) {
     let (_dir, _, _, repository) = setup(cx);
     let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));

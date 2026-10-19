@@ -27,6 +27,27 @@ fn pending_is_not_loading_until_started() {
 }
 
 #[test]
+fn mutable_data_preserves_activity_and_errors() {
+    let mut query = Query::<i32>::new();
+    assert!(query.data_mut().is_none());
+    query.start();
+    query.complete(Err("initial error".into()));
+    assert!(query.data_mut().is_none());
+    query.complete(Ok(1));
+    *query.data_mut().unwrap() = 2;
+    assert_eq!(query.data(), Some(&2));
+    assert!(!query.is_fetching());
+
+    query.start();
+    query.complete(Err("refresh error".into()));
+    query.start();
+    *query.data_mut().unwrap() = 3;
+    assert_eq!(query.data(), Some(&3));
+    assert_eq!(query.error(), Some("refresh error"));
+    assert!(query.is_fetching());
+}
+
+#[test]
 fn refresh_retains_data_until_replaced() {
     let mut query = Query::new();
     query.start();

@@ -47,6 +47,14 @@ impl<T> Query<T> {
         }
     }
 
+    pub fn data_mut(&mut self) -> Option<&mut T> {
+        match &mut self.result {
+            QueryResult::Pending => None,
+            QueryResult::Success(data) => Some(data),
+            QueryResult::Error { data, .. } => data.as_mut(),
+        }
+    }
+
     pub fn error(&self) -> Option<&str> {
         match &self.result {
             QueryResult::Error { error, .. } => Some(error),

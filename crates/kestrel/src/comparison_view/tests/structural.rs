@@ -52,8 +52,8 @@ fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut 
     redraw(cx);
     let (revision, key, file, cancellation) = view.read_with(cx, |view, cx| {
         let QueryResult::Success(loaded) = view.patch.result() else {
-            match &view.review {
-                ReviewStatus::Failed(error) => panic!("review: {error}"),
+            match view.review.result() {
+                QueryResult::Error { error, .. } => panic!("review: {error}"),
                 _ => match view.patch.result() {
                     QueryResult::Error { error, .. } => panic!("patch: {error}"),
                     _ => panic!("diff did not load"),
