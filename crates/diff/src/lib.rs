@@ -2,6 +2,8 @@
 //! discovery, transport, and schema validation; callers only see source lines
 //! and changed UTF-8 byte ranges. A future in-process backend uses this boundary.
 
+#![forbid(unsafe_code)]
+
 use std::{
     ops::Range,
     path::PathBuf,
@@ -39,6 +41,8 @@ impl Engine {
         Self::new(path)
     }
 
+    /// Use a trusted, single-process helper. Supervision covers only the child
+    /// we launch; it must not leave descendants holding its output pipes open.
     pub fn new(executable: PathBuf) -> Self {
         Self {
             backend: difftastic::Executable::new(executable),

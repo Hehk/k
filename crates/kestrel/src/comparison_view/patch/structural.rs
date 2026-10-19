@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use kestrel::structural_diff::{AlignedLine, Diff, SourceLine};
+use diff::{AlignedLine, Diff, SourceLine};
 
 use super::{DiffRow, DiffTone, RowSource, line_text, metadata};
 

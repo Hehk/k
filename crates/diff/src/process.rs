@@ -14,12 +14,6 @@ struct Running(Child);
 
 impl Drop for Running {
     fn drop(&mut self) {
-        // A helper must not outlive the request, including descendants holding
-        // its output pipes open. Each Unix invocation gets its own process group.
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.0.id() as i32), libc::SIGKILL);
-        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -49,11 +43,6 @@ pub(super) fn run(
     cancellation.check()?;
     if Instant::now() >= deadline {
         return Err(Error::Timeout);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
     }
     let mut child = Running(
         command

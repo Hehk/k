@@ -29,4 +29,8 @@ There is one diff view: Difftastic 0.71.0 compares supported files, with automat
 
 `nix develop` provides the pinned helper and sets `KESTREL_DIFFTASTIC`. The build also records that Nix store path, so the resulting executable can find it outside the shell. Lookup order is an explicit absolute `KESTREL_DIFFTASTIC` path, a `difft` executable beside Kestrel, then the build-time path. Missing or incompatible helpers fall back to text. A distributable app must package the helper and its license notices; signing and distribution are not implemented yet.
 
-`structural_diff` exposes source buffers, aligned source lines, and changed byte ranges. Its private backend owns JSON decoding, temporary files, and process supervision. Git access and GPUI stay outside that boundary, allowing a later in-process implementation without changing the viewer. Comparisons use an isolated child environment, bounded output, a one-second execution budget, and one helper at a time. No Git settings are changed.
+The [`diff`](crates/diff) workspace crate exposes source comparison, aligned lines, changed byte ranges, limits, and cancellation. Its private backend owns the Difftastic executable, JSON validation, temporary files, and process supervision. The app owns Git access, text fallback, and rendering; the crate has no runtime Git or GPUI dependencies.
+
+Comparisons use an isolated environment, bounded output, a one-second execution budget, and one helper at a time. Rust's `Child::kill` and `wait` supervise only the launched child, not process trees; custom helpers must honor that single-process contract. No Git settings are changed.
+
+Test the crate independently with `nix develop -c cargo test -p diff`.

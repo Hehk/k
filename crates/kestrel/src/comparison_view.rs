@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use diff::{Cancellation, Engine};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window, div, prelude::*, px,
     uniform_list,
@@ -10,7 +11,6 @@ use gpui::{
 use kestrel::{
     review::{Comparison, FileChange, GitPath, RefName},
     state::{BaseSelection, Browsing, RepositoryPage, Route},
-    structural_diff::{Cancellation, Engine},
 };
 
 use crate::{

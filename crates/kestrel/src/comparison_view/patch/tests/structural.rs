@@ -8,7 +8,7 @@ fn render(old: &str, new: &str) -> Arc<[DiffRow]> {
                 new,
                 path: "example.rs",
             },
-            structural_diff::Limits::default(),
+            diff::Limits::default(),
             &Cancellation::default(),
         )
         .unwrap();

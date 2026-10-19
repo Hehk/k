@@ -12,6 +12,7 @@ frame-metrics = []
 dirs.workspace = true
 gpui.workspace = true
 git2.workspace = true
+diff = { path = "../diff" }
 profiling = { version = "1", features = ["profile-with-tracing"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -26,9 +27,6 @@ gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

@@ -1,9 +1,9 @@
 use std::{ops::Range, sync::Arc};
 
+use diff::{Cancellation, Engine, Input};
 use kestrel::{
     git::Repository,
     review::{DiffLine, FileChange, FileContent, FilePatch, PreviewLimits, PreviewUnavailable},
-    structural_diff::{self, Cancellation, Engine, Input},
 };
 
 use crate::{appearance::DiffTone, diff_selection::RowSource};
@@ -46,7 +46,7 @@ impl LoadedPatch {
                 new: &new,
                 path: &hint,
             },
-            structural_diff::Limits {
+            diff::Limits {
                 source_bytes: limits.blob_bytes,
                 output_bytes: limits.patch_bytes,
                 lines: limits.patch_lines,
@@ -62,7 +62,7 @@ impl LoadedPatch {
                     Err(error) => error.to_string(),
                 }
             }
-            Err(structural_diff::Error::Cancelled) => return Err("Diff cancelled".into()),
+            Err(diff::Error::Cancelled) => return Err("Diff cancelled".into()),
             Err(error) => error.to_string(),
         };
         cancellation.check().map_err(|e| e.to_string())?;
@@ -203,16 +203,16 @@ impl PreparedPatch {
     }
 
     pub fn structural(
-        diff: structural_diff::Diff,
+        diff: diff::Diff,
         old: &str,
         new: &str,
         limits: PreviewLimits,
-    ) -> Result<Self, structural_diff::Error> {
+    ) -> Result<Self, diff::Error> {
         let rows = structural::rows(&diff, old, new);
         if rows.len() > limits.patch_lines
             || rows.iter().map(|row| row.text.len()).sum::<usize>() > limits.patch_bytes
         {
-            return Err(structural_diff::Error::Limit);
+            return Err(diff::Error::Limit);
         }
         Ok(Self::rows(rows))
     }

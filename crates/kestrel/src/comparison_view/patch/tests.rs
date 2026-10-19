@@ -1,5 +1,6 @@
 use super::*;
-use kestrel::{review::FileEntry, structural_diff::SourceLine};
+use diff::SourceLine;
+use kestrel::review::FileEntry;
 
 mod structural;
 
@@ -231,10 +232,10 @@ fn one_sided_files_and_edited_renames_keep_source_side_identity() {
 #[test]
 #[allow(clippy::single_range_in_vec_init)]
 fn structural_rows_are_bounded_even_when_alignment_expands_to_two_display_rows() {
-    let diff = structural_diff::Diff {
+    let diff = diff::Diff {
         language: "Rust".into(),
         has_changes: true,
-        lines: vec![structural_diff::AlignedLine {
+        lines: vec![diff::AlignedLine {
             old: Some(SourceLine {
                 number: 1,
                 text: "old\n".into(),
@@ -257,6 +258,6 @@ fn structural_rows_are_bounded_even_when_alignment_expands_to_two_display_rows()
                 ..Default::default()
             }
         ),
-        Err(structural_diff::Error::Limit)
+        Err(diff::Error::Limit)
     ));
 }

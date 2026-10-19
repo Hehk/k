@@ -338,10 +338,12 @@ mod supervision {
                 )
             });
             let deadline = Instant::now() + Duration::from_secs(5);
-            while !pid_path.exists() && Instant::now() < deadline {
+            while fs::metadata(&cwd_path).map_or(true, |metadata| metadata.len() == 0)
+                && Instant::now() < deadline
+            {
                 thread::sleep(Duration::from_millis(5));
             }
-            assert!(pid_path.exists());
+            assert!(fs::metadata(&cwd_path).is_ok_and(|metadata| metadata.len() > 0));
             if cancel {
                 cancellation.cancel();
             }
@@ -351,12 +353,17 @@ mod supervision {
             } else {
                 matches!(result, Err(Error::Timeout))
             });
-            let pid: i32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
-            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            let pid: u32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+            let probe = Command::new("/bin/ps")
+                .args(["-p", &pid.to_string(), "-o", "pid="])
+                .output()
+                .unwrap();
             assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
+                probe.status.code(),
+                Some(1),
+                "helper must be killed and reaped"
             );
+            assert!(probe.stdout.is_empty());
             assert!(!PathBuf::from(fs::read_to_string(cwd_path).unwrap()).exists());
         }
     }
@@ -366,14 +373,15 @@ mod supervision {
         const CHILD: &str = "KESTREL_DIFF_ENVIRONMENT_TEST";
         if std::env::var_os(CHILD).is_none() {
             let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "structural_diff::tests::supervision::parent_environment_and_git_attributes_do_not_change_the_result", "--nocapture"])
+                .args(["--exact", "tests::supervision::parent_environment_and_git_attributes_do_not_change_the_result", "--nocapture"])
                 .env(CHILD, "1").env("DFT_IGNORE_COMMENTS", "true").env("DFT_CHECK_ONLY", "true")
                 .env("DFT_OVERRIDE", "*:text").env("DFT_EXIT_CODE", "true").env("GIT_DIR", "/missing/git-dir")
                 .output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}");
             assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
+                stdout.contains("1 passed"),
+                "child test must actually run: {stdout}"
             );
             return;
         }
