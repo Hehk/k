@@ -151,7 +151,7 @@ impl TopBar {
                                             path.line_to(p(tail, 14.));
                                         }
                                         Icon::Clock => {
-                                            for index in 0..=32 {
+                                            for index in 0..32 {
                                                 let angle =
                                                     index as f32 * std::f32::consts::TAU / 32.;
                                                 let point = p(
@@ -164,6 +164,7 @@ impl TopBar {
                                                     path.line_to(point);
                                                 }
                                             }
+                                            path.close();
                                             path.move_to(p(8., 3.5));
                                             path.line_to(p(8., 8.));
                                             path.line_to(p(11., 9.5));
