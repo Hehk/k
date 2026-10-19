@@ -53,6 +53,52 @@ fn the_menu_keeps_only_as_many_rows_as_fit_without_scrolling() {
     assert_eq!(visible_limit(80.), 0);
 }
 
+#[gpui::test]
+fn long_labels_end_with_an_ellipsis_and_short_labels_stay_intact(cx: &mut gpui::TestAppContext) {
+    struct Label {
+        title: String,
+        layout: gpui::TextLayout,
+    }
+
+    impl Render for Label {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let text = gpui::StyledText::new(self.title.clone());
+            self.layout = text.layout().clone();
+            div().w_full().h(px(ROW_HEIGHT)).flex().child(label(text))
+        }
+    }
+
+    let (view, cx) = cx.add_window_view(|_, _| Label {
+        title: String::new(),
+        layout: gpui::TextLayout::default(),
+    });
+    for width in [280., 140., 60.] {
+        cx.simulate_resize(gpui::size(px(width), px(100.)));
+        for title in [
+            "example - very-long-branch-name/日本語/🦅".repeat(4),
+            "Home".into(),
+        ] {
+            view.update(cx, |view, cx| {
+                view.title = title.clone();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+            view.read_with(cx, |view, _| {
+                let displayed = view.layout.text();
+                if title == "Home" {
+                    assert_eq!(displayed, title);
+                } else {
+                    assert!(displayed.ends_with('…'), "{width}: {displayed}");
+                    assert!(title.starts_with(displayed.trim_end_matches('…')));
+                }
+                assert!(view.layout.bounds().size.width <= px(width));
+                assert!(view.layout.bounds().size.height <= px(ROW_HEIGHT));
+            });
+        }
+    }
+}
+
 #[test]
 fn unresolved_rows_keep_the_requested_base_instead_of_inventing_pins() {
     let mut record = fixture(1);

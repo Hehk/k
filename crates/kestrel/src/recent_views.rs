@@ -27,6 +27,17 @@ fn visible_limit(viewport_height: f32) -> usize {
     ((available / ROW_HEIGHT).floor().max(0.) as usize).min(RECENT_LIMIT)
 }
 
+fn label(text: impl IntoElement) -> gpui::Div {
+    // Keep width-sensitive measurement: GPUI caches nowrap text before flex assigns its final width.
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_sm()
+        .text_ellipsis()
+        .line_clamp(1)
+        .child(text)
+}
+
 struct Entry {
     id: ViewingId,
     title: String,
@@ -244,10 +255,8 @@ impl Render for RecentViews {
                                     .px_3()
                                     .flex()
                                     .items_center()
-                                    .text_sm()
                                     .text_color(theme.muted)
-                                    .truncate()
-                                    .child("No recent items to show."),
+                                    .child(label("No recent items to show.")),
                             )
                         })
                         .children(self.entries.iter().enumerate().map(|(index, entry)| {
@@ -262,6 +271,7 @@ impl Render for RecentViews {
                                 .items_center()
                                 .rounded_md()
                                 .cursor_default()
+                                .text_color(theme.text)
                                 .when(self.selected == Some(index), |row| row.bg(theme.selection))
                                 .tooltip(tooltip(entry.tooltip.clone()))
                                 .on_mouse_move(
@@ -273,15 +283,7 @@ impl Render for RecentViews {
                                         new_tab: event.modifiers().platform,
                                     })
                                 }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .text_color(theme.text)
-                                        .truncate()
-                                        .child(entry.title.clone()),
-                                )
+                                .child(label(entry.title.clone()))
                         })),
                 ),
         )
