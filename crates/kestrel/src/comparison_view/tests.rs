@@ -398,3 +398,83 @@ fn only_the_latest_base_request_can_complete_even_for_the_same_route(cx: &mut Te
         );
     });
 }
+
+#[gpui::test]
+fn patch_queries_reset_on_retry_and_file_changes(cx: &mut TestAppContext) {
+    let (_dir, _, _, repository) = setup(cx);
+    let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));
+    view.update(cx, |view, cx| {
+        view.load_review(Some("refs/heads/main".into()), false, cx);
+        let mut review = data("refs/heads/main");
+        review.changes = ["first.rs", "second.rs"]
+            .map(|file| FileChange::Added {
+                new: FileEntry {
+                    path: file.into(),
+                    id: review.comparison.commits.new,
+                    mode: 0o100644,
+                },
+            })
+            .into();
+        view.finish_review(
+            view.review_revision,
+            view.current_key(cx).unwrap(),
+            BaseSelection::Explicit("refs/heads/main".into()),
+            Ok(review),
+            cx,
+        );
+        assert!(view.patch.is_loading());
+        let key = view.current_key(cx).unwrap();
+        let file = path(view.patch_key.as_ref().unwrap()).clone();
+        view.finish_patch(
+            view.patch_revision,
+            &key,
+            &file,
+            Err("read failed".into()),
+            cx,
+        );
+        assert_eq!(view.patch.error(), Some("read failed"));
+        assert!(!view.patch.is_fetching());
+
+        view.patch_key = None;
+        view.load_patch(cx);
+        assert!(view.patch.is_loading());
+        assert!(view.patch.error().is_none());
+        let revision = view.patch_revision;
+        view.finish_patch(
+            revision,
+            &key,
+            &file,
+            Ok(LoadedPatch {
+                content: PreparedPatch::Unavailable(PreviewUnavailable::Binary),
+                status: "First file".into(),
+            }),
+            cx,
+        );
+        assert_eq!(view.patch.data().unwrap().status, "First file");
+        assert!(!view.patch.is_fetching());
+
+        let cancellation = view.patch_task.as_ref().unwrap().cancellation.clone();
+        view.select_file("second.rs".into(), cx);
+        view.load_patch(cx);
+        assert!(cancellation.check().is_err());
+        assert!(view.patch.is_loading());
+        assert!(view.patch.data().is_none());
+        assert!(view.selection.is_none());
+        view.finish_patch(revision, &key, &file, Err("obsolete first file".into()), cx);
+        assert!(view.patch.is_loading());
+        assert!(view.patch.error().is_none());
+
+        view.finish_patch(
+            view.patch_revision,
+            &key,
+            &"second.rs".into(),
+            Ok(LoadedPatch {
+                content: PreparedPatch::Unavailable(PreviewUnavailable::Binary),
+                status: "Second file".into(),
+            }),
+            cx,
+        );
+        assert_eq!(view.patch.data().unwrap().status, "Second file");
+        assert!(!view.patch.is_fetching());
+    });
+}

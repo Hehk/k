@@ -9,6 +9,7 @@ use gpui::{
     uniform_list,
 };
 use kestrel::{
+    query::{Query, QueryResult},
     review::{Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewUnavailable, RefName},
     state::{BaseSelection, Browsing, RepositoryPage, Route},
 };
@@ -18,7 +19,7 @@ use crate::{
     commands::Command,
     controls::{control, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
-    repository_model::{Load, RepositoryModel, branch_label, open},
+    repository_model::{RepositoryModel, branch_label, open},
 };
 
 mod gutter;
@@ -54,7 +55,7 @@ pub struct ComparisonView {
     review_task: Option<Task<()>>,
     review_revision: u64,
     patch_key: Option<FileChange>,
-    patch: Load<LoadedPatch>,
+    patch: Query<LoadedPatch>,
     patch_task: Option<PendingPatch>,
     engine: Arc<Engine>,
     patch_revision: u64,
@@ -263,7 +264,7 @@ impl ComparisonView {
             review_task: None,
             review_revision: 0,
             patch_key: None,
-            patch: Load::Loading,
+            patch: Query::new(),
             patch_task: None,
             engine: Arc::new(Engine::bundled()),
             patch_revision: 0,
@@ -282,6 +283,7 @@ impl ComparisonView {
             self.review_task.take();
             self.patch_revision += 1;
             self.patch_task.take();
+            self.patch = Query::new();
             self.selection = None;
             self.patch_key = None;
             self.review_key = key;
@@ -358,6 +360,7 @@ impl ComparisonView {
         let revision = self.review_revision;
         self.patch_revision += 1;
         self.patch_task.take();
+        self.patch = Query::new();
         self.selection = None;
         self.patch_key = None;
         self.review = ReviewStatus::Loading;
@@ -469,10 +472,11 @@ impl ComparisonView {
         self.patch_task.take();
         self.patch_key = change.clone();
         self.selection = None;
-        self.patch = Load::Loading;
+        self.patch = Query::new();
         let Some(change) = change else {
             return;
         };
+        self.patch.start();
         if browsing.file.as_ref() != Some(path(&change)) {
             self.select_file(path(&change).clone(), cx);
         }
@@ -528,10 +532,7 @@ impl ComparisonView {
             });
             self.selection = Some((selection, [observe, copy]));
         }
-        self.patch = match result {
-            Ok(patch) => Load::Ready(patch),
-            Err(error) => Load::Failed(error),
-        };
+        self.patch.complete(result);
         cx.notify();
     }
 
@@ -865,10 +866,7 @@ impl ComparisonView {
                             .text_sm()
                             .child(path(change).label())
                             .when_some(
-                                match &self.patch {
-                                    Load::Ready(patch) => Some(patch.status.clone()),
-                                    _ => None,
-                                },
+                                self.patch.data().map(|patch| patch.status.clone()),
                                 |title, status| title.tooltip(tooltip(status)),
                             ),
                     )
@@ -880,9 +878,15 @@ impl ComparisonView {
     }
 
     fn diff(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        match &self.patch {
-            Load::Loading => div().child("Loading diff…").into_any_element(),
-            Load::Failed(error) => div()
+        match self.patch.result() {
+            QueryResult::Pending => div()
+                .child(if self.patch.is_loading() {
+                    "Loading diff…"
+                } else {
+                    "No diff selected."
+                })
+                .into_any_element(),
+            QueryResult::Error { error, .. } => div()
                 .child(error.clone())
                 .child(
                     control("retry-patch", "Retry diff", theme).on_click(cx.listener(
@@ -893,7 +897,7 @@ impl ComparisonView {
                     )),
                 )
                 .into_any_element(),
-            Load::Ready(LoadedPatch {
+            QueryResult::Success(LoadedPatch {
                 content: PreparedPatch::Unavailable(reason),
                 ..
             }) => {
@@ -908,13 +912,13 @@ impl ComparisonView {
                     })
                     .into_any_element()
             }
-            Load::Ready(LoadedPatch {
+            QueryResult::Success(LoadedPatch {
                 content: PreparedPatch::Rows { rows, .. },
                 ..
             }) if rows.is_empty() => div()
                 .child("No text changes (metadata or mode change).")
                 .into_any_element(),
-            Load::Ready(LoadedPatch {
+            QueryResult::Success(LoadedPatch {
                 content: PreparedPatch::Rows { rows, widest, .. },
                 ..
             }) => {

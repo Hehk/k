@@ -51,11 +51,11 @@ fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut 
     });
     redraw(cx);
     let (revision, key, file, cancellation) = view.read_with(cx, |view, cx| {
-        let Load::Ready(loaded) = &view.patch else {
+        let QueryResult::Success(loaded) = view.patch.result() else {
             match &view.review {
                 ReviewStatus::Failed(error) => panic!("review: {error}"),
-                _ => match &view.patch {
-                    Load::Failed(error) => panic!("patch: {error}"),
+                _ => match view.patch.result() {
+                    QueryResult::Error { error, .. } => panic!("patch: {error}"),
                     _ => panic!("diff did not load"),
                 },
             }
@@ -102,13 +102,18 @@ fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut 
     view.update(cx, |view, cx| {
         view.engine = Arc::new(Engine::new("/missing/difft".into()));
         view.load_review(None, false, cx);
+        assert!(view.patch.is_pending());
+        assert!(!view.patch.is_fetching());
+        assert!(view.patch.data().is_none());
+        assert!(view.selection.is_none());
     });
     redraw(cx);
     assert!(cancellation.check().is_err());
     view.read_with(cx, |view, _| {
-        let Load::Ready(loaded) = &view.patch else {
+        let QueryResult::Success(loaded) = view.patch.result() else {
             panic!()
         };
+        assert!(!view.patch.is_fetching());
         assert!(
             loaded
                 .status
@@ -146,7 +151,10 @@ fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut 
             cx,
         )
     });
-    assert!(view.read_with(cx, |view, _| matches!(view.patch, Load::Ready(_))));
+    assert!(view.read_with(cx, |view, _| matches!(
+        view.patch.result(),
+        QueryResult::Success(_)
+    )));
     assert_eq!(
         view.read_with(cx, |view, _| view.selection.as_ref().unwrap().0.clone()),
         current_selection
@@ -161,7 +169,7 @@ fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut 
     });
     redraw(cx);
     view.read_with(cx, |view, _| {
-        let Load::Ready(loaded) = &view.patch else {
+        let QueryResult::Success(loaded) = view.patch.result() else {
             panic!()
         };
         assert_eq!(loaded.status, "Difftastic · Rust · Structural");

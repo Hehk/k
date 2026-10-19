@@ -7,12 +7,6 @@ use kestrel::{
 
 use crate::workspace::Workspace;
 
-pub enum Load<T> {
-    Loading,
-    Ready(T),
-    Failed(String),
-}
-
 pub struct RepositoryModel {
     workspace: Entity<Workspace>,
     window: WindowId,
