@@ -164,7 +164,7 @@ fn recent_menu_fits_without_scrolling_and_keeps_the_shared_history(cx: &mut Test
     let target = workspace.read_with(cx, |workspace, _| {
         workspace
             .viewing_history()
-            .recent(8)
+            .recent(6)
             .last()
             .unwrap()
             .viewed
@@ -178,10 +178,12 @@ fn recent_menu_fits_without_scrolling_and_keeps_the_shared_history(cx: &mut Test
     let popup = cx.debug_bounds("recent-views").unwrap();
     let first = cx.debug_bounds("recent-view-12").unwrap();
     let last = cx.debug_bounds("recent-view-3").unwrap();
-    assert_eq!(popup.size, size(px(320.), px(274.)));
-    assert_eq!(first.size.height, px(24.));
-    assert!(popup.contains(&first.origin));
-    assert!(popup.contains(&last.bottom_right()));
+    assert_eq!(popup.size, size(px(320.), px(326.)));
+    assert_eq!(first.size.height, px(28.));
+    assert_eq!(first.left() - popup.left(), px(9.));
+    assert_eq!(popup.right() - first.right(), px(9.));
+    assert_eq!(first.top() - popup.top(), px(37.));
+    assert_eq!(popup.bottom() - last.bottom(), px(9.));
     cx.simulate_event(gpui::ScrollWheelEvent {
         position: first.center(),
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1000.))),
@@ -197,10 +199,10 @@ fn recent_menu_fits_without_scrolling_and_keeps_the_shared_history(cx: &mut Test
     let popup = cx.debug_bounds("recent-views").unwrap();
     assert!(popup.left() >= px(0.) && popup.right() <= px(360.));
     assert!(popup.top() >= px(40.) && popup.bottom() <= px(280.));
-    assert_eq!(popup.size.height, px(226.));
+    assert_eq!(popup.size.height, px(214.));
     cx.simulate_keystrokes("end");
     redraw(cx);
-    assert!(popup.contains(&cx.debug_bounds("recent-view-5").unwrap().bottom_right()));
+    assert!(popup.contains(&cx.debug_bounds("recent-view-7").unwrap().bottom_right()));
     workspace.read_with(cx, |workspace, _| {
         assert_eq!(workspace.viewing_history().records().len(), 13)
     });

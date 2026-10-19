@@ -48,8 +48,8 @@ fn rows_show_tab_names_with_identity_and_shortcuts_in_tooltips() {
 fn the_menu_keeps_only_as_many_rows_as_fit_without_scrolling() {
     assert_eq!(visible_limit(760.), 10);
     assert_eq!(visible_limit(400.), 10);
-    assert_eq!(visible_limit(280.), 8);
-    assert_eq!(visible_limit(160.), 3);
+    assert_eq!(visible_limit(280.), 6);
+    assert_eq!(visible_limit(160.), 2);
     assert_eq!(visible_limit(80.), 0);
 }
 

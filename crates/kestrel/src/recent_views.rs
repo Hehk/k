@@ -17,9 +17,10 @@ pub enum RecentEvent {
     Open { id: ViewingId, new_tab: bool },
 }
 
-const ROW_HEIGHT: f32 = 24.;
-const HEADER_HEIGHT: f32 = 24.;
-const MENU_CHROME: f32 = HEADER_HEIGHT + 10.;
+const ROW_HEIGHT: f32 = 28.;
+const HEADER_HEIGHT: f32 = 28.;
+const MENU_PADDING: f32 = 8.;
+const MENU_CHROME: f32 = HEADER_HEIGHT + 2. * MENU_PADDING + 2.;
 
 fn visible_limit(viewport_height: f32) -> usize {
     let available = viewport_height - TITLEBAR_HEIGHT - 12. - MENU_CHROME;
@@ -205,7 +206,7 @@ impl Render for RecentViews {
                 .track_focus(&self.focus)
                 .flex()
                 .flex_col()
-                .p_1()
+                .p(px(MENU_PADDING))
                 .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
@@ -224,7 +225,7 @@ impl Render for RecentViews {
                     div()
                         .h(px(HEADER_HEIGHT))
                         .flex_shrink_0()
-                        .px_2()
+                        .px_3()
                         .flex()
                         .items_center()
                         .text_sm()
@@ -240,7 +241,9 @@ impl Render for RecentViews {
                             list.child(
                                 div()
                                     .h(px(ROW_HEIGHT))
-                                    .px_2()
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
                                     .text_sm()
                                     .text_color(theme.muted)
                                     .truncate()
@@ -254,7 +257,7 @@ impl Render for RecentViews {
                                 .debug_selector(move || format!("recent-view-{}", id.0))
                                 .h(px(ROW_HEIGHT))
                                 .flex_shrink_0()
-                                .px_2()
+                                .px_3()
                                 .flex()
                                 .items_center()
                                 .rounded_md()
