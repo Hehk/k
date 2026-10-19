@@ -300,7 +300,7 @@ impl ComparisonView {
     }
 
     fn refresh_review(&mut self, cx: &mut Context<Self>) {
-        if let Load::Ready(snapshot) = self.repository.read(cx).snapshot()
+        if let Some(snapshot) = self.repository.read(cx).snapshot().data()
             && let ReviewStatus::Ready(data) = &mut self.review
         {
             data.fresh = snapshot.branches.iter().any(|branch| {
@@ -329,10 +329,12 @@ impl ComparisonView {
             .unwrap_or_else(|| key.base.clone());
         let reference = match &base {
             BaseSelection::Explicit(base) => Some(base.clone()),
-            BaseSelection::Default => match self.repository.read(cx).snapshot() {
-                Load::Ready(snapshot) => snapshot.default_base.clone(),
-                _ => None,
-            },
+            BaseSelection::Default => self
+                .repository
+                .read(cx)
+                .snapshot()
+                .data()
+                .and_then(|snapshot| snapshot.default_base.clone()),
         };
         if key.comparison.is_none() && reference.is_none() {
             self.review = ReviewStatus::ChooseBase;
@@ -603,13 +605,31 @@ impl ComparisonView {
                         },
                     ),
             )
+            .when(
+                self.repository.read(cx).snapshot().is_refreshing(),
+                |panel| {
+                    panel.child(
+                        div()
+                            .text_color(theme.muted)
+                            .child("Refreshing local refs…"),
+                    )
+                },
+            )
+            .when_some(
+                self.repository
+                    .read(cx)
+                    .snapshot()
+                    .error()
+                    .map(str::to_owned),
+                |panel, error| panel.child(div().text_color(theme.error).child(error)),
+            )
             .when(self.base_open, |picker| {
-                picker.child(match self.repository.read(cx).snapshot() {
-                    Load::Ready(snapshot) => uniform_list(
+                picker.child(match self.repository.read(cx).snapshot().data() {
+                    Some(snapshot) => uniform_list(
                         "base-options",
                         snapshot.branches.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            let Load::Ready(snapshot) = this.repository.read(cx).snapshot() else {
+                            let Some(snapshot) = this.repository.read(cx).snapshot().data() else {
                                 return Vec::new();
                             };
                             range
@@ -636,8 +656,9 @@ impl ComparisonView {
                     )
                     .h(px(150.))
                     .into_any_element(),
-                    Load::Loading => div().child("Loading bases…").into_any_element(),
-                    Load::Failed(error) => div().child(error.clone()).into_any_element(),
+                    None => div()
+                        .child("Bases unavailable or loading…")
+                        .into_any_element(),
                 })
             })
     }

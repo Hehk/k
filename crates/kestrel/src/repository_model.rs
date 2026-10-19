@@ -1,6 +1,7 @@
 use gpui::{App, Context, Entity, Task};
 use kestrel::{
     git::{Branch, Repository, Snapshot},
+    query::Query,
     state::{Project, Route, TabId, WindowId},
 };
 
@@ -17,7 +18,7 @@ pub struct RepositoryModel {
     window: WindowId,
     tab: TabId,
     project: Project,
-    snapshot: Load<Snapshot>,
+    snapshot: Query<Snapshot>,
     task: Option<Task<()>>,
     revision: u64,
 }
@@ -35,7 +36,7 @@ impl RepositoryModel {
             window,
             tab,
             project,
-            snapshot: Load::Loading,
+            snapshot: Query::new(),
             task: None,
             revision: 0,
         };
@@ -55,7 +56,7 @@ impl RepositoryModel {
         &self.project
     }
 
-    pub fn snapshot(&self) -> &Load<Snapshot> {
+    pub fn snapshot(&self) -> &Query<Snapshot> {
         &self.snapshot
     }
 
@@ -74,7 +75,7 @@ impl RepositoryModel {
         self.revision += 1;
         let revision = self.revision;
         let project = self.project.clone();
-        self.snapshot = Load::Loading;
+        self.snapshot.start();
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -88,10 +89,7 @@ impl RepositoryModel {
                 if this.revision != revision || this.route(cx).is_none() {
                     return;
                 }
-                this.snapshot = match result {
-                    Ok(snapshot) => Load::Ready(snapshot),
-                    Err(error) => Load::Failed(error),
-                };
+                this.snapshot.complete(result);
                 cx.notify();
             });
         }));
@@ -111,6 +109,9 @@ pub fn open(project: &Project) -> Result<Repository, String> {
     }
     Ok(repository)
 }
+
+#[cfg(test)]
+mod tests;
 
 pub fn branch_label(branch: &Branch) -> String {
     format!(

@@ -14,7 +14,7 @@ use kestrel::{
 use crate::{
     appearance::Theme,
     controls::control,
-    repository_model::{Load, RepositoryModel, branch_label},
+    repository_model::{RepositoryModel, branch_label},
     text_input::{InputEvent, TextInput},
 };
 
@@ -75,7 +75,7 @@ impl BranchView {
                     cx,
                 ),
                 InputEvent::Submit => {
-                    if let Load::Ready(snapshot) = this.repository.read(cx).snapshot()
+                    if let Some(snapshot) = this.repository.read(cx).snapshot().data()
                         && let Some(index) = this.visible.first()
                     {
                         this.select_branch(snapshot.branches[*index].name.clone(), cx);
@@ -115,9 +115,9 @@ impl BranchView {
     }
 
     fn filter(&mut self, cx: &App) {
-        self.visible = match self.repository.read(cx).snapshot() {
-            Load::Ready(snapshot) => ordered_branches(snapshot, &self.filters),
-            _ => Vec::new(),
+        self.visible = match self.repository.read(cx).snapshot().data() {
+            Some(snapshot) => ordered_branches(snapshot, &self.filters),
+            None => Vec::new(),
         };
     }
 
@@ -238,24 +238,20 @@ impl Render for BranchView {
                     },
                 )),
             );
-        let body = match self.repository.read(cx).snapshot() {
-            Load::Loading => div().child("Loading branches…").into_any_element(),
-            Load::Failed(error) => div()
-                .text_color(theme.error)
-                .child(error.clone())
-                .into_any_element(),
-            Load::Ready(snapshot) if snapshot.branches.is_empty() => div()
+        let body = match self.repository.read(cx).snapshot().data() {
+            None => div().child("Loading branches…").into_any_element(),
+            Some(snapshot) if snapshot.branches.is_empty() => div()
                 .child("No branches yet. This repository may be empty.")
                 .into_any_element(),
-            Load::Ready(_) if self.visible.is_empty() => div()
+            Some(_) if self.visible.is_empty() => div()
                 .child("No branches match your search.")
                 .into_any_element(),
-            Load::Ready(_) => uniform_list(
+            Some(_) => uniform_list(
                 "branches",
                 self.visible.len(),
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     let repository = this.repository.read(cx);
-                    let Load::Ready(snapshot) = repository.snapshot() else {
+                    let Some(snapshot) = repository.snapshot().data() else {
                         return Vec::new();
                     };
                     range
@@ -311,7 +307,29 @@ impl Render for BranchView {
                 panel.child(div().text_color(theme.error).child(error))
             })
             .child(header)
-            .child(body)
+            .when(
+                self.repository.read(cx).snapshot().is_refreshing(),
+                |panel| {
+                    panel.child(
+                        div()
+                            .text_color(theme.muted)
+                            .child("Refreshing local refs…"),
+                    )
+                },
+            )
+            .when_some(
+                self.repository
+                    .read(cx)
+                    .snapshot()
+                    .error()
+                    .map(str::to_owned),
+                |panel, error| panel.child(div().text_color(theme.error).child(error)),
+            )
+            .when(
+                self.repository.read(cx).snapshot().data().is_some()
+                    || self.repository.read(cx).snapshot().error().is_none(),
+                |panel| panel.child(body),
+            )
     }
 }
 
