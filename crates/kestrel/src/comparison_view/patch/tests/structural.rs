@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 fn render(old: &str, new: &str) -> Arc<[DiffRow]> {
     let diff = Engine::bundled()
@@ -12,6 +13,7 @@ fn render(old: &str, new: &str) -> Arc<[DiffRow]> {
             &Cancellation::default(),
         )
         .unwrap();
+    let whole_file = old.is_empty() || new.is_empty();
     let expected = diff
         .lines
         .iter()
@@ -22,15 +24,13 @@ fn render(old: &str, new: &str) -> Arc<[DiffRow]> {
             ]
             .into_iter()
             .flat_map(|(side, tone)| {
-                side.into_iter().flat_map(move |line| {
-                    line.changes
-                        .iter()
-                        .map(move |range| (tone, line.number, line.text[range.clone()].to_owned()))
-                })
+                side.into_iter()
+                    .filter(move |line| whole_file || !line.changes.is_empty())
+                    .map(move |line| (tone, line.number, line_text(&line.text).to_owned()))
             })
         })
         .collect::<Vec<_>>();
-    let PreparedPatch::Rows { rows, .. } =
+    let PreparedPatch::Rows { rows, text, .. } =
         PreparedPatch::structural(diff, old, new, PreviewLimits::default()).unwrap()
     else {
         panic!()
@@ -56,9 +56,13 @@ fn render(old: &str, new: &str) -> Arc<[DiffRow]> {
             } else {
                 assert_eq!(source, row.text.as_ref());
             }
-            for (range, tone) in &row.highlights {
-                actual.push((*tone, number, row.text[range.clone()].to_owned()));
+            if matches!(row.tone, DiffTone::Added | DiffTone::Deleted) {
+                actual.push((row.tone, number, row.text.to_string()));
             }
+            let RowSource::Code(range) = &row.source else {
+                panic!()
+            };
+            assert_eq!(&text[range.clone()], row.text.as_ref());
         }
     }
     for tone in [DiffTone::Deleted, DiffTone::Added] {
@@ -83,19 +87,19 @@ fn adjacent_edits_read_as_a_before_block_then_an_after_block() {
     let rows = render(old, new);
     let changed = rows
         .iter()
-        .filter(|row| !row.highlights.is_empty())
+        .filter(|row| matches!(row.tone, DiffTone::Added | DiffTone::Deleted))
         .map(|row| (row.old.as_ref(), row.new.as_ref(), row.marker))
         .collect::<Vec<_>>();
     assert_eq!(
         changed,
         [
-            ("2", "", "−"),
-            ("3", "", "−"),
+            ("2", "", "-"),
+            ("3", "", "-"),
             ("", "2", "+"),
             ("", "3", "+")
         ]
     );
-    assert_eq!(rows[0].text.as_ref(), "Change 1 · Before 1–5 · After 1–5");
+    assert_eq!(rows[0].text.as_ref(), "@@ -1,5 +1,5 @@");
 }
 
 #[test]
@@ -125,7 +129,7 @@ fn wrapping_and_unwrapping_keep_surviving_code_once_and_never_invent_deletions()
     );
     assert!(
         rows.iter()
-            .any(|row| row.marker == "−" && row.text.contains("if enabled"))
+            .any(|row| row.marker == "-" && row.text.contains("if enabled"))
     );
 }
 
@@ -149,7 +153,7 @@ fn reflowed_expressions_are_not_cut_at_the_context_boundary() {
 }
 
 #[test]
-fn separated_changes_have_source_ranges_and_explicit_omissions() {
+fn separated_changes_use_existing_hunk_headers() {
     let old = format!(
         "fn main() {{\n{}}}\n",
         (1..=30)
@@ -165,30 +169,12 @@ fn separated_changes_have_source_ranges_and_explicit_omissions() {
         .filter(|row| row.tone == DiffTone::Hunk)
         .map(|row| row.text.as_ref())
         .collect::<Vec<_>>();
-    assert_eq!(
-        headings,
-        [
-            "Change 1 · Before 3–9 · After 3–9",
-            "Change 2 · Before 23–29 · After 23–29"
-        ]
-    );
-    let gaps = rows
-        .iter()
-        .filter(|row| row.text.ends_with("omitted"))
-        .map(|row| row.text.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        gaps,
-        [
-            "… Before 1–2 · After 1–2 omitted",
-            "… Before 10–22 · After 10–22 omitted",
-            "… Before 30–32 · After 30–32 omitted"
-        ]
-    );
+    assert_eq!(headings, ["@@ -3,7 +3,7 @@", "@@ -23,7 +23,7 @@"]);
+    assert!(rows.iter().all(|row| row.tone != DiffTone::Metadata));
 }
 
 #[test]
-fn unicode_multiline_and_one_sided_sources_keep_exact_highlight_identity() {
+fn unicode_multiline_and_one_sided_sources_keep_line_identity() {
     for (old, new) in [
         (
             "fn main() { let café = \"🦀\"; foo(1); }",
@@ -207,10 +193,10 @@ fn unicode_multiline_and_one_sided_sources_keep_exact_highlight_identity() {
     ] {
         let rows = render(old, new);
         if old.is_empty() || new.is_empty() {
-            let marker = if old.is_empty() { "+" } else { "−" };
+            let marker = if old.is_empty() { "+" } else { "-" };
             assert!(
                 rows.iter()
-                    .filter(|row| row.is_source())
+                    .filter(|row| matches!(row.source, RowSource::Code(_)))
                     .all(|row| row.marker == marker)
             );
         }

@@ -1,6 +1,6 @@
 use super::*;
 use diff::SourceLine;
-use kestrel::review::FileEntry;
+use kestrel::review::{DiffLine, FileEntry, FilePatch, PreviewUnavailable};
 
 mod structural;
 
@@ -45,16 +45,13 @@ impl Fixture {
     }
 }
 
-fn highlights(patch: &LoadedPatch) -> Vec<(String, DiffTone)> {
+fn changed_lines(patch: &LoadedPatch) -> Vec<(String, DiffTone)> {
     let PreparedPatch::Rows { rows, .. } = &patch.content else {
         panic!()
     };
     rows.iter()
-        .flat_map(|row| {
-            row.highlights
-                .iter()
-                .map(|(range, tone)| (row.text[range.clone()].to_owned(), *tone))
-        })
+        .filter(|row| matches!(row.tone, DiffTone::Added | DiffTone::Deleted))
+        .map(|row| (row.text.to_string(), row.tone))
         .collect()
 }
 
@@ -81,12 +78,10 @@ fn structural_and_fallback_diffs_use_the_same_blobs_and_line_colors() {
     let structural = fixture.load(&change, &engine);
     assert_eq!(structural.status, "Difftastic · Rust · Structural");
     assert_eq!(
-        highlights(&structural),
+        changed_lines(&structural),
         vec![
-            ("if".into(), DiffTone::Added),
-            ("enabled".into(), DiffTone::Added),
-            ("{".into(), DiffTone::Added),
-            ("}".into(), DiffTone::Added)
+            ("    if enabled {".into(), DiffTone::Added),
+            ("    }".into(), DiffTone::Added)
         ]
     );
     let PreparedPatch::Rows { rows, .. } = &structural.content else {
@@ -102,12 +97,7 @@ fn structural_and_fallback_diffs_use_the_same_blobs_and_line_colors() {
         "indentation-only changes should not duplicate the code"
     );
     assert_eq!((show[0].old.as_ref(), show[0].new.as_ref()), ("2", "3"));
-    assert!(show[0].highlights.is_empty());
     assert_eq!(show[0].tone, DiffTone::Context);
-    for row in rows.iter().filter(|row| !row.highlights.is_empty()) {
-        assert_eq!(row.tone, DiffTone::Added);
-        assert!(row.highlights.iter().all(|(_, tone)| *tone == row.tone));
-    }
     let text = fixture.load(&change, &Engine::new("/missing/difft".into()));
     assert!(text.status.starts_with("Text fallback"));
     let PreparedPatch::Rows { rows, .. } = text.content else {
@@ -213,18 +203,12 @@ fn one_sided_files_and_edited_renames_keep_source_side_identity() {
     for change in changes {
         let loaded = fixture.load(&change, &Engine::bundled());
         assert!(loaded.status.starts_with("Difftastic"), "{}", loaded.status);
-        let PreparedPatch::Rows { rows, .. } = &loaded.content else {
-            panic!()
-        };
-        for row in rows.iter().filter(|row| !row.highlights.is_empty()) {
-            assert!(row.highlights.iter().all(|(_, tone)| *tone == row.tone));
-        }
-        let spans = highlights(&loaded);
-        assert!(!spans.is_empty());
+        let changed = changed_lines(&loaded);
+        assert!(!changed.is_empty());
         if matches!(change, FileChange::Deleted { .. }) {
-            assert!(spans.iter().all(|(_, tone)| *tone == DiffTone::Deleted));
+            assert!(changed.iter().all(|(_, tone)| *tone == DiffTone::Deleted));
         } else {
-            assert!(spans.iter().all(|(_, tone)| *tone == DiffTone::Added));
+            assert!(changed.iter().all(|(_, tone)| *tone == DiffTone::Added));
         }
     }
 }

@@ -1,12 +1,10 @@
-use std::{ops::Range, sync::Arc};
-
 use diff::{Cancellation, Engine, Input};
 use kestrel::{
     git::Repository,
-    review::{DiffLine, FileChange, FileContent, FilePatch, PreviewLimits, PreviewUnavailable},
+    review::{FileChange, FileContent, PreviewLimits},
 };
 
-use crate::{appearance::DiffTone, diff_selection::RowSource};
+use super::{DiffRow, DiffTone, PreparedPatch, RowSource};
 
 mod structural;
 
@@ -76,50 +74,34 @@ impl LoadedPatch {
     }
 }
 
-pub(super) struct DiffRow {
-    pub old: gpui::SharedString,
-    pub new: gpui::SharedString,
-    pub text: gpui::SharedString,
-    pub marker: &'static str,
-    pub tone: DiffTone,
-    pub highlights: Vec<(Range<usize>, DiffTone)>,
-    pub source: RowSource,
-}
-
-impl DiffRow {
-    pub fn is_source(&self) -> bool {
-        !self.old.is_empty() || !self.new.is_empty()
-    }
-}
-
-pub(super) enum PreparedPatch {
-    Unavailable(PreviewUnavailable),
-    Rows {
-        rows: Arc<[DiffRow]>,
-        widest: Option<usize>,
-        text: gpui::SharedString,
-    },
-}
-
 impl PreparedPatch {
-    fn rows(mut rows: Vec<DiffRow>) -> Self {
-        // Selection follows the displayed reading order, not either source file.
-        // Assign offsets after grouping; headings and omissions are boundaries,
-        // never clipboard text.
+    fn structural(
+        diff: diff::Diff,
+        old: &str,
+        new: &str,
+        limits: PreviewLimits,
+    ) -> Result<Self, diff::Error> {
+        let mut rows = structural::rows(&diff, old, new);
+        if rows.len() > limits.patch_lines
+            || rows.iter().map(|row| row.text.len()).sum::<usize>() > limits.patch_bytes
+        {
+            return Err(diff::Error::Limit);
+        }
+        // Adapt source alignment to the existing renderer and its copy buffer.
+        // Display order may contain both revisions; metadata is never copied.
         let mut plain = String::new();
         let mut terminated = true;
         for row in &mut rows {
-            row.source = if row.is_source() {
+            row.source = if row.old.is_empty() && row.new.is_empty() {
+                RowSource::Boundary(plain.len())
+            } else {
                 terminated = row.text.ends_with('\n');
                 row.text = line_text(&row.text).to_owned().into();
                 let start = plain.len();
                 plain.push_str(&row.text);
                 let source = RowSource::Code(start..plain.len());
-                // Keep old/new rows separate even when either lacks a newline.
                 plain.push('\n');
                 source
-            } else {
-                RowSource::Boundary(plain.len())
             };
         }
         if !terminated {
@@ -128,93 +110,13 @@ impl PreparedPatch {
         let widest = rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.is_source())
             .max_by_key(|(_, row)| row.text.len())
             .map(|(index, _)| index);
-        Self::Rows {
+        Ok(Self::Rows {
             rows: rows.into(),
             widest,
             text: plain.into(),
-        }
-    }
-
-    pub fn new(patch: FilePatch) -> Self {
-        let hunks = match patch {
-            FilePatch::Unavailable(reason) => return Self::Unavailable(reason),
-            FilePatch::Hunks(hunks) => hunks,
-        };
-        let mut rows = Vec::new();
-        for hunk in hunks {
-            rows.push(metadata(hunk.header.trim_end().to_owned(), DiffTone::Hunk));
-            for line in hunk.lines {
-                let (old, new, text, tone, marker) = match line {
-                    DiffLine::Context {
-                        old_line,
-                        new_line,
-                        text,
-                    } => (
-                        old_line.to_string(),
-                        new_line.to_string(),
-                        text,
-                        DiffTone::Context,
-                        "",
-                    ),
-                    DiffLine::Added { new_line, text } => (
-                        String::new(),
-                        new_line.to_string(),
-                        text,
-                        DiffTone::Added,
-                        "+",
-                    ),
-                    DiffLine::Deleted { old_line, text } => (
-                        old_line.to_string(),
-                        String::new(),
-                        text,
-                        DiffTone::Deleted,
-                        "−",
-                    ),
-                    DiffLine::NoNewline(side) => (
-                        String::new(),
-                        String::new(),
-                        format!(
-                            "No final newline · {}",
-                            match side {
-                                kestrel::review::DiffSide::Old => "Before",
-                                kestrel::review::DiffSide::New => "After",
-                                kestrel::review::DiffSide::Both => "Both",
-                            }
-                        ),
-                        DiffTone::Metadata,
-                        "",
-                    ),
-                };
-                rows.push(DiffRow {
-                    old: old.into(),
-                    new: new.into(),
-                    text: text.into(),
-                    marker,
-                    tone,
-                    highlights: Vec::new(),
-                    source: RowSource::Boundary(0),
-                });
-            }
-        }
-        Self::rows(rows)
-    }
-
-    pub fn structural(
-        diff: diff::Diff,
-        old: &str,
-        new: &str,
-        limits: PreviewLimits,
-    ) -> Result<Self, diff::Error> {
-        let rows = structural::rows(&diff, old, new);
-        if rows.len() > limits.patch_lines
-            || rows.iter().map(|row| row.text.len()).sum::<usize>() > limits.patch_bytes
-        {
-            return Err(diff::Error::Limit);
-        }
-        Ok(Self::rows(rows))
+        })
     }
 }
 
@@ -225,7 +127,6 @@ fn metadata(text: String, tone: DiffTone) -> DiffRow {
         text: text.into(),
         marker: "",
         tone,
-        highlights: Vec::new(),
         source: RowSource::Boundary(0),
     }
 }

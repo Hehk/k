@@ -9,7 +9,7 @@ use gpui::{
     uniform_list,
 };
 use kestrel::{
-    review::{Comparison, FileChange, GitPath, RefName},
+    review::{Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewUnavailable, RefName},
     state::{BaseSelection, Browsing, RepositoryPage, Route},
 };
 
@@ -17,21 +17,22 @@ use crate::{
     appearance::{DiffTone, Theme},
     commands::Command,
     controls::{control, tooltip},
-    diff_selection::{CopySelection, DiffSelection},
+    diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{Load, RepositoryModel, branch_label, open},
 };
 
 mod gutter;
 mod patch;
-mod reading;
-use patch::{DiffRow, LoadedPatch, PreparedPatch};
+use patch::LoadedPatch;
 
-fn token_highlight(theme: Theme, tone: DiffTone) -> gpui::HighlightStyle {
-    gpui::HighlightStyle {
-        background_color: Some(theme.diff(tone).blend(theme.text.opacity(0.08))),
-        ..Default::default()
-    }
-}
+const DIFF_NUMBER_WIDTH: f32 = 48.;
+const DIFF_MARKER_WIDTH: f32 = 12.;
+const DIFF_GUTTER_WIDTH: f32 = 2. * DIFF_NUMBER_WIDTH + DIFF_MARKER_WIDTH;
+const DIFF_FONT: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else {
+    "monospace"
+};
 
 struct PendingPatch {
     _task: Task<()>,
@@ -86,6 +87,118 @@ enum ReviewStatus {
     Loading,
     Ready(ReviewData),
     Failed(String),
+}
+
+struct DiffRow {
+    old: gpui::SharedString,
+    new: gpui::SharedString,
+    text: gpui::SharedString,
+    marker: &'static str,
+    tone: DiffTone,
+    source: RowSource,
+}
+
+enum PreparedPatch {
+    Unavailable(PreviewUnavailable),
+    Rows {
+        rows: Arc<[DiffRow]>,
+        widest: Option<usize>,
+        text: gpui::SharedString,
+    },
+}
+
+impl PreparedPatch {
+    fn new(patch: FilePatch) -> Self {
+        let hunks = match patch {
+            FilePatch::Unavailable(reason) => return Self::Unavailable(reason),
+            FilePatch::Hunks(hunks) => hunks,
+        };
+        let mut rows = Vec::new();
+        let mut plain = String::new();
+        let mut terminated = true;
+        for hunk in hunks {
+            rows.push(DiffRow {
+                old: "".into(),
+                new: "".into(),
+                text: hunk.header.trim_end().to_owned().into(),
+                marker: "",
+                tone: DiffTone::Hunk,
+                source: RowSource::Boundary(plain.len()),
+            });
+            for line in hunk.lines {
+                let (old, new, text, tone, prefix) = match line {
+                    DiffLine::Context {
+                        old_line,
+                        new_line,
+                        text,
+                    } => (
+                        old_line.to_string(),
+                        new_line.to_string(),
+                        text,
+                        DiffTone::Context,
+                        Some(" "),
+                    ),
+                    DiffLine::Added { new_line, text } => (
+                        String::new(),
+                        new_line.to_string(),
+                        text,
+                        DiffTone::Added,
+                        Some("+"),
+                    ),
+                    DiffLine::Deleted { old_line, text } => (
+                        old_line.to_string(),
+                        String::new(),
+                        text,
+                        DiffTone::Deleted,
+                        Some("-"),
+                    ),
+                    DiffLine::NoNewline(side) => (
+                        String::new(),
+                        String::new(),
+                        format!("\\ No newline at end of file ({side:?})"),
+                        DiffTone::Metadata,
+                        None,
+                    ),
+                };
+                let (text, source) = if prefix.is_some() {
+                    terminated = text.ends_with('\n');
+                    let text = text
+                        .strip_suffix('\n')
+                        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+                        .unwrap_or(&text);
+                    let start = plain.len();
+                    plain.push_str(text);
+                    let source = RowSource::Code(start..plain.len());
+                    // Old and new rows remain separate even if either side lacks a newline.
+                    plain.push('\n');
+                    (text.to_owned(), source)
+                } else {
+                    (text, RowSource::Boundary(plain.len()))
+                };
+                rows.push(DiffRow {
+                    old: old.into(),
+                    new: new.into(),
+                    text: text.into(),
+                    marker: prefix.unwrap_or(""),
+                    tone,
+                    source,
+                });
+            }
+        }
+        if !terminated {
+            plain.pop();
+        }
+        let widest = rows
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, row)| row.text.len())
+            .map(|(index, _)| index);
+        Self::Rows {
+            rows: rows.into(),
+            widest,
+            text: plain.into(),
+        }
+    }
 }
 
 fn path(change: &FileChange) -> &GitPath {
@@ -402,7 +515,7 @@ impl ComparisonView {
         }) = &result
         {
             let selection =
-                cx.new(|cx| DiffSelection::new(text.clone(), px(reading::GUTTER_WIDTH), cx));
+                cx.new(|cx| DiffSelection::new(text.clone(), px(DIFF_GUTTER_WIDTH), cx));
             let observe = cx.observe(&selection, |_, _, cx| cx.notify());
             let key = key.clone();
             let selected_file = selected_file.clone();
@@ -724,34 +837,25 @@ impl ComparisonView {
                     .new_file()
                     .map_or_else(|| "—".into(), |file| format!("{:o}", file.mode));
                 panel
-                    .child(div().text_sm().child(path(change).label()))
+                    .child(
+                        div()
+                            .id("diff-file-title")
+                            .debug_selector(|| "diff-file-title".into())
+                            .text_sm()
+                            .child(path(change).label())
+                            .when_some(
+                                match &self.patch {
+                                    Load::Ready(patch) => Some(patch.status.clone()),
+                                    _ => None,
+                                },
+                                |title, status| title.tooltip(tooltip(status)),
+                            ),
+                    )
                     .when(old != new, |panel| {
                         panel.child(div().text_sm().child(format!("Mode: {old} → {new}")))
                     })
             })
-            .when_some(
-                match &self.patch {
-                    Load::Ready(patch) => Some(patch.status.clone()),
-                    _ => None,
-                },
-                |panel, status| {
-                    panel.child(
-                        div()
-                            .debug_selector(|| "diff-engine".into())
-                            .text_xs()
-                            .text_color(theme.muted)
-                            .child(status),
-                    )
-                },
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(self.diff(theme, cx)),
-            )
+            .child(div().flex_1().min_h_0().child(self.diff(theme, cx)))
     }
 
     fn diff(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -793,12 +897,45 @@ impl ComparisonView {
                 content: PreparedPatch::Rows { rows, widest, .. },
                 ..
             }) => {
-                let selection = &self
+                let rows = Arc::clone(rows);
+                let selection = self
                     .selection
                     .as_ref()
                     .expect("loaded text patches have a selection controller")
-                    .0;
-                reading::view(Arc::clone(rows), *widest, theme, selection, cx)
+                    .0
+                    .clone();
+                let row_selection = selection.clone();
+                let gutter = gutter::DiffGutter(Arc::clone(&rows));
+                let list = uniform_list("diff-lines", rows.len(), move |range, window, cx| {
+                    range
+                        .map(|index| {
+                            let DiffRow {
+                                text, tone, source, ..
+                            } = &rows[index];
+                            div()
+                                .debug_selector(move || format!("diff-line-{index}"))
+                                .h(px(DIFF_ROW_HEIGHT))
+                                .pl(px(DIFF_GUTTER_WIDTH))
+                                .flex()
+                                .bg(theme.diff(*tone))
+                                .font_family(DIFF_FONT)
+                                .text_size(px(13.))
+                                .child(row_selection.update(cx, |selection, cx| {
+                                    selection
+                                        .row(index, text.clone(), source.clone(), window, cx)
+                                        .debug_selector(move || format!("diff-source-{index}"))
+                                }))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .with_width_from_item(*widest)
+                .with_decoration(gutter)
+                .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+                .size_full()
+                .into_any_element();
+                selection
+                    .update(cx, |selection, cx| selection.wrap(list, cx))
+                    .into_any_element()
             }
         }
     }

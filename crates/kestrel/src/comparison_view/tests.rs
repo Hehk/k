@@ -1,13 +1,9 @@
 use super::*;
-use crate::{
-    appearance::DiffTone,
-    diff_selection::RowSource,
-    workspace::{LoadedWorkspace, Workspace},
-};
+use crate::workspace::{LoadedWorkspace, Workspace};
 use gpui::{Entity, TestAppContext};
 use kestrel::{
     git::RepositoryInfo,
-    review::{DiffLine, DiffSide, Endpoints, FileEntry, FilePatch, Hunk, PreviewUnavailable},
+    review::{DiffSide, Endpoints, FileEntry, Hunk},
     state::TabId,
     storage::Store,
 };
@@ -142,21 +138,32 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
             ("10", "20", "keep λ  ", DiffTone::Context),
             ("11", "", "removed", DiffTone::Deleted),
             ("", "21", "added", DiffTone::Added),
-            ("", "", "No final newline · Before", DiffTone::Metadata),
-            ("", "", "No final newline · After", DiffTone::Metadata),
-            ("", "", "No final newline · Both", DiffTone::Metadata),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (Old)",
+                DiffTone::Metadata
+            ),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (New)",
+                DiffTone::Metadata
+            ),
+            (
+                "",
+                "",
+                "\\ No newline at end of file (Both)",
+                DiffTone::Metadata
+            ),
             ("", "", header.as_str(), DiffTone::Hunk),
             ("", "100", "tail", DiffTone::Added),
         ]
     );
-    assert_eq!(
-        widest,
-        Some(1),
-        "section labels must not widen the code viewport"
-    );
+    assert_eq!(widest, Some(7));
     assert_eq!(
         rows.iter().map(|row| row.marker).collect::<Vec<_>>(),
-        ["", "", "−", "+", "", "", "", "", "+"]
+        vec!["", " ", "-", "+", "", "", "", "", "+"]
     );
     assert_eq!(text.as_ref(), "keep λ  \nremoved\nadded\ntail");
     for row in rows.iter() {

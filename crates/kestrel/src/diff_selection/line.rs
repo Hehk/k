@@ -12,37 +12,11 @@ pub(super) struct Line {
     pub index: usize,
     pub text: SharedString,
     pub source: RowSource,
-    pub backgrounds: Vec<(Range<usize>, Hsla)>,
+    pub selected: Option<Range<usize>>,
     pub newline: bool,
     pub selection_color: Hsla,
     pub gutter_width: Pixels,
     pub hits: Rc<RefCell<BTreeMap<usize, HitRow>>>,
-}
-
-pub(super) fn backgrounds(
-    highlights: Vec<(Range<usize>, Hsla)>,
-    selected: Option<Range<usize>>,
-    selection_color: Hsla,
-) -> Vec<(Range<usize>, Hsla)> {
-    let Some(selected) = selected else {
-        return highlights;
-    };
-    // Selection replaces token emphasis rather than blending with it. Keep
-    // disjoint runs so GPUI can also paint complex-script backgrounds correctly.
-    let mut backgrounds = Vec::with_capacity(highlights.len() + 2);
-    for (range, color) in highlights {
-        for remainder in [
-            range.start..range.end.min(selected.start),
-            range.start.max(selected.end)..range.end,
-        ] {
-            if !remainder.is_empty() {
-                backgrounds.push((remainder, color));
-            }
-        }
-    }
-    backgrounds.push((selected, selection_color));
-    backgrounds.sort_unstable_by_key(|(range, _)| range.start);
-    backgrounds
 }
 
 pub fn shape(text: SharedString, window: &Window) -> ShapedLine {
@@ -135,26 +109,25 @@ impl Element for Line {
     ) -> (LayoutId, ShapedLine) {
         let style = window.text_style();
         let run = style.to_run(self.text.len());
-        let mut runs = Vec::new();
-        let mut offset = 0;
-        for (range, color) in &self.backgrounds {
-            if offset < range.start {
-                runs.push(TextRun {
-                    len: range.start - offset,
+        let runs = if let Some(selected) = &self.selected {
+            vec![
+                TextRun {
+                    len: selected.start,
                     ..run.clone()
-                });
-            }
-            runs.push(TextRun {
-                len: range.len(),
-                background_color: Some(*color),
-                ..run.clone()
-            });
-            offset = range.end;
-        }
-        runs.push(TextRun {
-            len: self.text.len() - offset,
-            ..run
-        });
+                },
+                TextRun {
+                    len: selected.len(),
+                    background_color: Some(self.selection_color),
+                    ..run.clone()
+                },
+                TextRun {
+                    len: self.text.len() - selected.end,
+                    ..run
+                },
+            ]
+        } else {
+            vec![run]
+        };
         let line = window.text_system().shape_line(
             self.text.clone(),
             style.font_size.to_pixels(window.rem_size()),
@@ -202,29 +175,29 @@ impl Element for Line {
         );
         let color = window.text_style().color;
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-            if line.text.is_ascii() {
-                for (range, color) in &self.backgrounds {
-                    let start = if range.start == 0 {
+            if let Some(selected) = &self.selected {
+                if line.text.is_ascii() {
+                    let start = if selected.start == 0 {
                         px(0.)
                     } else {
-                        line.x_for_index(range.start)
+                        line.x_for_index(selected.start)
                     };
-                    let end = if range.end == line.len() {
+                    let end = if selected.end == line.len() {
                         line.width
                     } else {
-                        line.x_for_index(range.end)
+                        line.x_for_index(selected.end)
                     };
                     window.paint_quad(fill(
                         Bounds::new(
                             point(bounds.left() + start, bounds.top()),
                             size(end - start, bounds.size.height),
                         ),
-                        *color,
+                        self.selection_color,
                     ));
+                } else {
+                    // Let GPUI handle backgrounds spanning complex-script glyph clusters.
+                    let _ = line.paint_background(bounds.origin, bounds.size.height, window, cx);
                 }
-            } else if !self.backgrounds.is_empty() {
-                // Let GPUI handle backgrounds spanning complex-script glyph clusters.
-                let _ = line.paint_background(bounds.origin, bounds.size.height, window, cx);
             }
             if self.newline {
                 window.paint_quad(fill(
@@ -256,43 +229,6 @@ impl Element for Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selection_overrides_token_backgrounds_without_losing_unselected_emphasis() {
-        let token: Hsla = gpui::rgb(0x668844).into();
-        let selected: Hsla = gpui::rgb(0x446688).into();
-        let highlights = vec![(1..5, token), (7..9, token)];
-        for (selection, expected) in [
-            (None, highlights.clone()),
-            (
-                Some(2..3),
-                vec![
-                    (1..2, token),
-                    (2..3, selected),
-                    (3..5, token),
-                    (7..9, token),
-                ],
-            ),
-            (
-                Some(3..8),
-                vec![(1..3, token), (3..8, selected), (8..9, token)],
-            ),
-            (Some(0..10), vec![(0..10, selected)]),
-            (
-                Some(5..7),
-                vec![(1..5, token), (5..7, selected), (7..9, token)],
-            ),
-        ] {
-            assert_eq!(
-                backgrounds(highlights.clone(), selection, selected),
-                expected
-            );
-        }
-        assert_eq!(
-            backgrounds(Vec::new(), Some(0..3), selected),
-            vec![(0..3, selected)]
-        );
-    }
     #[gpui::test]
     fn clipping_limits_ascii_work_and_preserves_other_glyph_orders(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();

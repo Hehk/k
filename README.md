@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Structural diffs
 
-There is one diff view: Difftastic 0.71.0 compares supported files, with automatic libgit2 fallback when structural comparison is unavailable or fails. The label above the diff identifies the engine or fallback reason. Both use the same line colors and typography; structural token highlights add subtle background emphasis, not bold text. Formatting-only changes remain in the file list with a “No structural changes” notice, and missing-final-newline metadata remains visible.
+Difftastic 0.71.0 supplies comparison data to the existing diff view, with automatic libgit2 fallback when structural comparison is unavailable or fails. Layout, gutters, line styling, selection, and scrolling are unchanged. Hover over the file title for the engine or fallback reason. Formatting-only files and missing-final-newline metadata remain visible.
 
 `nix develop` provides the pinned helper and sets `KESTREL_DIFFTASTIC`. The build also records that Nix store path, so the resulting executable can find it outside the shell. Lookup order is an explicit absolute `KESTREL_DIFFTASTIC` path, a `difft` executable beside Kestrel, then the build-time path. Missing or incompatible helpers fall back to text. A distributable app must package the helper and its license notices; signing and distribution are not implemented yet.
 

@@ -354,8 +354,6 @@ fn diff_selection_copies_only_source_and_resets_on_file_changes(cx: &mut TestApp
     let last = cx.debug_bounds("diff-line-4").unwrap();
     let start = gpui::point(first.left() + px(1.), first.center().y);
     let end = gpui::point(last.right() - px(1.), last.center().y);
-    let selectable = cx.debug_bounds("selectable-diff").unwrap();
-    assert!(selectable.contains(&start) && selectable.contains(&end));
     for (from, to) in [(start, end), (end, start)] {
         cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
         redraw(cx);
@@ -473,7 +471,7 @@ fn large_diffs_keep_gutters_fixed_and_selection_virtualized(cx: &mut TestAppCont
     });
     assert!(cx.debug_bounds("diff-line-2500").is_none());
     let gutter = cx.debug_bounds("diff-gutter-102").unwrap();
-    assert_eq!(gutter.size.width, px(124.));
+    assert_eq!(gutter.size.width, px(108.));
     let source = cx.debug_bounds("diff-source-102").unwrap();
     cx.simulate_event(gpui::ScrollWheelEvent {
         position,

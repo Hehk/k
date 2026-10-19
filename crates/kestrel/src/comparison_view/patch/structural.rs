@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use diff::{AlignedLine, Diff, SourceLine};
 
-use super::{DiffRow, DiffTone, RowSource, line_text, metadata};
+use super::{DiffRow, DiffTone, RowSource, metadata};
 
 const CONTEXT_LINES: usize = 3;
 
@@ -15,23 +15,16 @@ pub(super) fn rows(diff: &Diff, old: &str, new: &str) -> Vec<DiffRow> {
         ));
     } else {
         let whole_file = old.is_empty() || new.is_empty();
-        let mut end = 0;
-        for (index, section) in sections(&diff.lines, whole_file).into_iter().enumerate() {
-            omitted(&mut rows, &diff.lines[end..section.start]);
-            let lines = &diff.lines[section.clone()];
-            rows.push(metadata(
-                format!("Change {} · {}", index + 1, location(lines)),
-                DiffTone::Hunk,
-            ));
+        for section in sections(&diff.lines, whole_file) {
+            let lines = &diff.lines[section];
+            rows.push(metadata(header(lines), DiffTone::Hunk));
             append_section(&mut rows, lines, whole_file);
-            end = section.end;
         }
-        omitted(&mut rows, &diff.lines[end..]);
     }
-    for (side, text) in [("Before", old), ("After", new)] {
+    for (side, text) in [("Old", old), ("New", new)] {
         if !text.is_empty() && !text.ends_with('\n') {
             rows.push(metadata(
-                format!("No final newline · {side}"),
+                format!("\\ No newline at end of file ({side})"),
                 DiffTone::Metadata,
             ));
         }
@@ -134,14 +127,11 @@ fn append_section(rows: &mut Vec<DiffRow>, lines: &[AlignedLine], whole_file: bo
     }
 }
 
-fn location(lines: &[AlignedLine]) -> String {
+fn header(lines: &[AlignedLine]) -> String {
     fn extent(mut lines: impl Iterator<Item = u32>) -> String {
-        let Some(first) = lines.next() else {
-            return "—".into();
-        };
-        match lines.last() {
-            Some(last) if last != first => format!("{first}–{last}"),
-            _ => first.to_string(),
+        match lines.next() {
+            Some(first) => format!("{first},{}", lines.count() + 1),
+            None => "0,0".into(),
         }
     }
     let old = extent(
@@ -154,20 +144,10 @@ fn location(lines: &[AlignedLine]) -> String {
             .iter()
             .filter_map(|line| line.new.as_ref().map(|line| line.number)),
     );
-    format!("Before {old} · After {new}")
-}
-
-fn omitted(rows: &mut Vec<DiffRow>, lines: &[AlignedLine]) {
-    if !lines.is_empty() {
-        rows.push(metadata(
-            format!("… {} omitted", location(lines)),
-            DiffTone::Metadata,
-        ));
-    }
+    format!("@@ -{old} +{new} @@")
 }
 
 fn source_row(line: &SourceLine, old: bool, whole_file: bool) -> DiffRow {
-    let text = line_text(&line.text);
     let changed = whole_file || !line.changes.is_empty();
     let tone = if old {
         DiffTone::Deleted
@@ -188,20 +168,12 @@ fn source_row(line: &SourceLine, old: bool, whole_file: bool) -> DiffRow {
         text: line.text.clone().into(),
         source: RowSource::Boundary(0),
         marker: if !changed {
-            ""
+            " "
         } else if old {
-            "−"
+            "-"
         } else {
             "+"
         },
         tone: if changed { tone } else { DiffTone::Context },
-        highlights: line
-            .changes
-            .iter()
-            .filter_map(|range| {
-                let end = range.end.min(text.len());
-                (range.start < end).then_some((range.start..end, tone))
-            })
-            .collect(),
     }
 }

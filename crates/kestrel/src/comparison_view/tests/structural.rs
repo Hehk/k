@@ -1,23 +1,6 @@
 use super::*;
 use gpui::{Modifiers, VisualTestContext};
 
-#[test]
-fn token_highlights_preserve_the_shared_diff_typography() {
-    for appearance in [gpui::WindowAppearance::Light, gpui::WindowAppearance::Dark] {
-        let theme = Theme::resolve(appearance, crate::appearance::Preferences::default(), true);
-        for tone in [DiffTone::Added, DiffTone::Deleted] {
-            let highlight = token_highlight(theme, tone);
-            assert!(highlight.font_weight.is_none());
-            assert!(highlight.font_style.is_none());
-            assert!(highlight.color.is_none());
-            assert_eq!(
-                highlight.background_color,
-                Some(theme.diff(tone).blend(theme.text.opacity(0.08)))
-            );
-        }
-    }
-}
-
 fn redraw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear());
@@ -31,7 +14,7 @@ fn copy_all(cx: &mut VisualTestContext, expected: &str) {
 }
 
 #[gpui::test]
-fn viewer_uses_one_ui_and_falls_back_without_advancing_pins(cx: &mut TestAppContext) {
+fn difftastic_uses_existing_view_and_falls_back_without_advancing_pins(cx: &mut TestAppContext) {
     cx.update(crate::diff_selection::bind_keys);
     let (dir, workspace, tab, repository) = setup(cx);
     let git = git2::Repository::init(dir.path().join("repo")).unwrap();
@@ -81,7 +64,7 @@ fn viewer_uses_one_ui_and_falls_back_without_advancing_pins(cx: &mut TestAppCont
         let PreparedPatch::Rows { rows, .. } = &loaded.content else {
             panic!()
         };
-        assert!(rows.iter().any(|row| !row.highlights.is_empty()));
+        assert!(rows.iter().any(|row| row.tone == DiffTone::Added));
         (
             view.patch_revision,
             view.current_key(cx).unwrap(),
@@ -98,7 +81,22 @@ fn viewer_uses_one_ui_and_falls_back_without_advancing_pins(cx: &mut TestAppCont
         view.read_with(cx, |view, _| view.selection.as_ref().unwrap().0.clone());
     assert!(cx.debug_bounds("structural-diff").is_none());
     assert!(cx.debug_bounds("text-diff").is_none());
-    assert!(cx.debug_bounds("diff-engine").is_some());
+    assert!(cx.debug_bounds("diff-engine").is_none());
+    assert!(cx.debug_bounds("diff-reading-surface").is_none());
+    assert!(cx.debug_bounds("diff-section-0").is_none());
+    assert_eq!(
+        cx.debug_bounds("diff-gutter-1").unwrap().size.width,
+        px(108.)
+    );
+    let title = cx.debug_bounds("diff-file-title").unwrap();
+    cx.simulate_mouse_move(title.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("tooltip-Difftastic · Rust · Structural")
+            .is_some()
+    );
     // A missing helper on reload must fall back using the same pinned blobs.
     commit("refs/heads/topic", Some(head), "fn unrelated_latest() {}\n");
     view.update(cx, |view, cx| {
@@ -121,7 +119,7 @@ fn viewer_uses_one_ui_and_falls_back_without_advancing_pins(cx: &mut TestAppCont
         };
         assert!(rows.iter().any(|row| row.text.contains("if enabled")));
         assert!(!rows.iter().any(|row| row.text.contains("unrelated_latest")));
-        assert!(rows.iter().all(|row| row.highlights.is_empty()));
+        assert!(rows.iter().any(|row| row.tone == DiffTone::Deleted));
     });
     cx.update(|_, cx| {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));

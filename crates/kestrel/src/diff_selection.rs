@@ -209,7 +209,6 @@ impl DiffSelection {
         index: usize,
         text: SharedString,
         source: RowSource,
-        highlights: Vec<(Range<usize>, gpui::Hsla)>,
         window: &Window,
         cx: &App,
     ) -> Div {
@@ -234,7 +233,7 @@ impl DiffSelection {
             index,
             text,
             source,
-            backgrounds: line::backgrounds(highlights, selected, color),
+            selected,
             newline,
             selection_color: color,
             gutter_width: self.gutter_width,
