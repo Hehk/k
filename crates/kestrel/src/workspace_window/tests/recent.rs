@@ -152,9 +152,7 @@ fn recent_click_targets_this_tab_and_command_click_creates_a_fresh_tab(cx: &mut 
 }
 
 #[gpui::test]
-fn recent_limit_keyboard_scrolling_and_narrow_window_bounds_use_the_shared_projection(
-    cx: &mut TestAppContext,
-) {
+fn recent_menu_fits_without_scrolling_and_keeps_the_shared_history(cx: &mut TestAppContext) {
     let (dir, workspace, handle) = start(cx);
     for index in 0..13 {
         let info = repository(&dir.path().join(format!("repo-{index}")));
@@ -166,7 +164,7 @@ fn recent_limit_keyboard_scrolling_and_narrow_window_bounds_use_the_shared_proje
     let target = workspace.read_with(cx, |workspace, _| {
         workspace
             .viewing_history()
-            .recent(10)
+            .recent(8)
             .last()
             .unwrap()
             .viewed
@@ -174,15 +172,35 @@ fn recent_limit_keyboard_scrolling_and_narrow_window_bounds_use_the_shared_proje
             .clone()
     });
     let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    cx.simulate_resize(size(px(360.), px(400.)));
+    redraw(cx);
+    click_clock(cx);
+    let popup = cx.debug_bounds("recent-views").unwrap();
+    let first = cx.debug_bounds("recent-view-12").unwrap();
+    let last = cx.debug_bounds("recent-view-3").unwrap();
+    assert_eq!(popup.size, size(px(320.), px(274.)));
+    assert_eq!(first.size.height, px(24.));
+    assert!(popup.contains(&first.origin));
+    assert!(popup.contains(&last.bottom_right()));
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: first.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+        ..Default::default()
+    });
+    redraw(cx);
+    assert_eq!(cx.debug_bounds("recent-view-12").unwrap(), first);
+    assert_eq!(cx.debug_bounds("recent-view-3").unwrap(), last);
+    cx.simulate_keystrokes("escape");
     cx.simulate_resize(size(px(360.), px(280.)));
     redraw(cx);
     click_clock(cx);
     let popup = cx.debug_bounds("recent-views").unwrap();
     assert!(popup.left() >= px(0.) && popup.right() <= px(360.));
     assert!(popup.top() >= px(40.) && popup.bottom() <= px(280.));
+    assert_eq!(popup.size.height, px(226.));
     cx.simulate_keystrokes("end");
     redraw(cx);
-    assert!(popup.contains(&cx.debug_bounds("recent-view-3").unwrap().center()));
+    assert!(popup.contains(&cx.debug_bounds("recent-view-5").unwrap().bottom_right()));
     workspace.read_with(cx, |workspace, _| {
         assert_eq!(workspace.viewing_history().records().len(), 13)
     });
