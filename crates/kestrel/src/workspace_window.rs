@@ -6,6 +6,7 @@ use gpui::{
 };
 use kestrel::{
     git::{Repository, RepositoryInfo},
+    query::{Query, QueryResult},
     state::{ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId},
 };
 
@@ -21,12 +22,6 @@ use crate::{
     workspace::{Workspace, project_title, set_tab_layout, tab_title},
 };
 
-enum RepositoryStatus {
-    Loading,
-    Ready,
-    Unavailable(String),
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OpenTarget {
     tab: TabId,
@@ -41,8 +36,7 @@ pub struct Kestrel {
     id: WindowId,
     focus: FocusHandle,
     selection: Option<(TabId, ProjectId)>,
-    repository: RepositoryStatus,
-    repository_view: Option<Entity<RepositoryView>>,
+    repository: Query<Entity<RepositoryView>>,
     repository_views: HashMap<TabId, (ProjectId, Entity<RepositoryView>)>,
     repository_task: Option<Task<()>>,
     request: u64,
@@ -112,8 +106,7 @@ impl Kestrel {
             id,
             focus,
             selection: None,
-            repository: RepositoryStatus::Loading,
-            repository_view: None,
+            repository: Query::new(),
             repository_views: HashMap::new(),
             repository_task: None,
             request: 0,
@@ -474,14 +467,13 @@ impl Kestrel {
         self.selection = active;
         self.request += 1;
         self.repository_task.take();
-        self.repository = RepositoryStatus::Loading;
-        self.repository_view = None;
+        self.repository = Query::new();
         let Some((tab, project)) = active else { return };
         if let Some((_, view)) = self.repository_views.get(&tab) {
-            self.repository_view = Some(view.clone());
-            self.repository = RepositoryStatus::Ready;
+            self.repository.complete(Ok(view.clone()));
             return;
         }
+        self.repository.start();
         let project = self
             .workspace
             .read(cx)
@@ -504,7 +496,7 @@ impl Kestrel {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.request == request {
-                    this.repository = match result {
+                    let result = match result {
                         Ok(()) => {
                             let workspace = this.workspace.clone();
                             let window = this.id;
@@ -513,11 +505,11 @@ impl Kestrel {
                                 RepositoryView::new(workspace, window, tab, view_project, cx)
                             });
                             this.repository_views.insert(tab, (project, view.clone()));
-                            this.repository_view = Some(view);
-                            RepositoryStatus::Ready
+                            Ok(view)
                         }
-                        Err(error) => RepositoryStatus::Unavailable(error),
+                        Err(error) => Err(error),
                     };
+                    this.repository.complete(result);
                     cx.notify();
                 }
             });
@@ -648,13 +640,12 @@ impl Render for Kestrel {
                                 this.child(div().text_sm().text_color(theme.muted).child(directory))
                             },
                         )
-                        .when(directory.is_some(), |this| match &self.repository {
-                            RepositoryStatus::Loading => this.child("Opening repository…"),
-                            RepositoryStatus::Ready => this
-                                .when_some(self.repository_view.clone(), |this, view| {
-                                    this.child(div().flex_1().min_h_0().child(view))
-                                }),
-                            RepositoryStatus::Unavailable(error) => this
+                        .when(directory.is_some(), |this| match self.repository.result() {
+                            QueryResult::Pending => this.child("Opening repository…"),
+                            QueryResult::Success(view) => {
+                                this.child(div().flex_1().min_h_0().child(view.clone()))
+                            }
+                            QueryResult::Error { error, .. } => this
                                 .child(
                                     div()
                                         .text_color(theme.error)

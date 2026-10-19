@@ -548,7 +548,7 @@ fn restoration_keeps_home_duplicate_routes_and_missing_repositories(cx: &mut Tes
         .register_project(&repository(&dir.path().join("missing")))
         .unwrap();
     let first = state.new_window().unwrap();
-    state.new_tab(first).unwrap();
+    let home = state.new_tab(first).unwrap();
     let a = state.new_tab(first).unwrap();
     let b = state.new_tab(first).unwrap();
     state.open_project(available, a).unwrap();
@@ -576,7 +576,8 @@ fn restoration_keeps_home_duplicate_routes_and_missing_repositories(cx: &mut Tes
     );
     first
         .read_with(cx, |root, cx| {
-            assert!(matches!(root.repository, RepositoryStatus::Ready));
+            assert!(root.repository.data().is_some());
+            assert!(!root.repository.is_fetching());
             assert_eq!(
                 root.top_bar.read(cx).active_tab().unwrap().title,
                 "available - review-b"
@@ -585,7 +586,48 @@ fn restoration_keeps_home_duplicate_routes_and_missing_repositories(cx: &mut Tes
         .unwrap();
     second
         .read_with(cx, |root, _| {
-            assert!(matches!(root.repository, RepositoryStatus::Unavailable(_)))
+            assert!(root.repository.error().is_some());
+            assert!(root.repository.data().is_none());
+            assert!(!root.repository.is_fetching());
+        })
+        .unwrap();
+
+    first
+        .update(cx, |root, _, cx| {
+            let cached = root.repository.data().unwrap().clone();
+            root.workspace.update(cx, |workspace, cx| {
+                workspace.edit(|state| state.select_tab(home), cx).unwrap();
+            });
+            root.load_project(cx);
+            assert!(root.repository.is_pending());
+            assert!(!root.repository.is_fetching());
+            assert!(root.repository.data().is_none());
+
+            root.workspace.update(cx, |workspace, cx| {
+                workspace.edit(|state| state.select_tab(b), cx).unwrap();
+            });
+            root.load_project(cx);
+            assert_eq!(root.repository.data(), Some(&cached));
+            assert!(!root.repository.is_fetching());
+        })
+        .unwrap();
+
+    repository(&dir.path().join("missing"));
+    second
+        .update(cx, |root, _, cx| {
+            root.selection = None;
+            root.load_project(cx);
+            assert!(root.repository.is_loading());
+            assert!(root.repository.data().is_none());
+            assert!(root.repository.error().is_none());
+        })
+        .unwrap();
+    cx.run_until_parked();
+    second
+        .read_with(cx, |root, _| {
+            assert!(root.repository.data().is_some());
+            assert!(root.repository.error().is_none());
+            assert!(!root.repository.is_fetching());
         })
         .unwrap();
 }

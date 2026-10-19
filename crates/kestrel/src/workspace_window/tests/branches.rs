@@ -551,7 +551,7 @@ fn appearance_preferences_preserve_the_loaded_review_and_open_base_picker(cx: &m
 
     let before = workspace.read_with(cx, |workspace, _| workspace.state().clone());
     let view = handle
-        .read_with(cx, |root, _| root.repository_view.clone().unwrap())
+        .read_with(cx, |root, _| root.repository.data().unwrap().clone())
         .unwrap();
     for preferences in [
         Preferences {
@@ -572,7 +572,7 @@ fn appearance_preferences_preserve_the_loaded_review_and_open_base_picker(cx: &m
         );
         assert_eq!(
             handle
-                .read_with(cx, |root, _| root.repository_view.clone().unwrap())
+                .read_with(cx, |root, _| root.repository.data().unwrap().clone())
                 .unwrap(),
             view,
         );
