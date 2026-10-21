@@ -63,6 +63,71 @@ fn browsing(state: &mut AppState, tab: TabId, file: &str, line: u32) {
 }
 
 #[test]
+fn seeding_a_new_tab_preserves_pins_and_view_without_a_home_step() {
+    let (mut state, source, _) = setup();
+    complete(
+        &mut state,
+        source,
+        ComparisonChange::Resolve,
+        comparison(2, "refs/heads/main"),
+    );
+    browsing(&mut state, source, "saved.rs", 73);
+    let original = state.tab(source).unwrap().clone();
+    let snapshot = original.snapshot().unwrap().snapshot;
+    let window = state.active_window().unwrap();
+    let tab = state.new_tab(window).unwrap();
+    let initial = state.tab(tab).unwrap().snapshot().unwrap();
+    state
+        .navigate(tab, Navigation::SeedSnapshot(snapshot.clone()))
+        .unwrap();
+    let seeded = state.tab(tab).unwrap();
+    assert_eq!(seeded.snapshot().unwrap().snapshot, snapshot);
+    assert_ne!(seeded.visit_id(), initial.id);
+    assert_eq!(seeded.activation(), 1);
+    assert!(!seeded.can_go_back());
+    assert!(!seeded.can_go_forward());
+    assert_eq!(state.tab(source).unwrap(), &original);
+
+    let before = state.clone();
+    assert!(
+        state
+            .navigate(tab, Navigation::SeedSnapshot(snapshot.clone()))
+            .is_err()
+    );
+    assert_eq!(
+        state, before,
+        "seeding must not erase an existing tab's trail"
+    );
+    let encoded = serde_json::to_vec(&state).unwrap();
+    state = serde_json::from_slice(&encoded).unwrap();
+    state.go_back(tab).unwrap();
+    state.go_forward(tab).unwrap();
+    assert_eq!(state, before);
+    state.go_home(tab).unwrap();
+    state.go_back(tab).unwrap();
+    assert_eq!(
+        state.tab(tab).unwrap().snapshot().unwrap().snapshot,
+        snapshot
+    );
+    assert!(!state.tab(tab).unwrap().can_go_back());
+}
+
+#[test]
+fn invalid_seed_leaves_a_fresh_tab_unchanged() {
+    let (mut state, source, _) = setup();
+    let mut snapshot = state.tab(source).unwrap().snapshot().unwrap().snapshot;
+    snapshot.view.browsing.file = Some("../outside".into());
+    let tab = state.new_tab(state.active_window().unwrap()).unwrap();
+    let before = state.clone();
+    assert!(
+        state
+            .navigate(tab, Navigation::SeedSnapshot(snapshot))
+            .is_err()
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
 fn resolution_updates_a_visit_but_new_comparisons_preserve_the_old_visit() {
     let (mut state, tab, _) = setup();
     let pending = state.tab(tab).unwrap().visit_id();

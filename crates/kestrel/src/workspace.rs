@@ -267,6 +267,8 @@ impl Workspace {
         Ok(value)
     }
 
+    /// Commit structural edits to current state, not workspace loading/restoration.
+    /// See [`Event::Replace`] for the history-binding identity constraint.
     pub fn replace(&mut self, state: AppState, cx: &mut Context<Self>) {
         self.dispatch(Event::Replace(state), cx)
             .expect("replacement cannot fail");

@@ -67,6 +67,65 @@ fn journal(records: &[Record]) -> Vec<u8> {
     bytes
 }
 
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn new_journals_are_private_even_with_a_permissive_umask() {
+    const CHILD: &str = "KESTREL_HISTORY_PERMISSION_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        // umask is process-wide: change it only in an isolated test process.
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "umask 000; exec \"$@\"", "history-permission-test"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "viewing_history::storage::tests::new_journals_are_private_even_with_a_permissive_umask", "--nocapture"])
+            .env(CHILD, "1")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (_, history) = history(dir.path());
+    let path = dir.path().join("history.jsonl");
+    let mut store = Store::new(path.clone());
+    store.load(&mut AppState::default()).unwrap();
+    store.append(history.records()).unwrap();
+    assert_eq!(mode(&path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_journals_are_made_private_on_load_and_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, history) = history(dir.path());
+    let path = dir.path().join("history.jsonl");
+    let original = journal(history.records());
+    fs::write(&path, &original).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut store = Store::new(path.clone());
+    let loaded = store.load(&mut AppState::default()).unwrap();
+    assert_eq!(loaded.history.records(), history.records());
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(fs::read(&path).unwrap(), original);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    store.append([&history.records()[0]]).unwrap();
+    assert_eq!(mode(&path), 0o600);
+    assert!(fs::read(&path).unwrap().starts_with(&original));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    store.load(&mut AppState::default()).unwrap();
+    assert_eq!(mode(&path), 0o400, "do not expand the owner's permissions");
+}
+
 #[test]
 fn append_updates_preserve_the_prefix_visit_order_and_lossless_values() {
     let dir = tempfile::tempdir().unwrap();
@@ -213,10 +272,13 @@ fn interrupted_final_lines_are_backed_up_before_resuming_from_the_valid_prefix()
         let mut store = Store::new(path.clone());
         let loaded = store.load(&mut AppState::default()).unwrap();
         assert_eq!(loaded.history.records(), history.records());
-        assert_eq!(
-            fs::read(loaded.recovery.unwrap().backup).unwrap(),
-            interrupted
-        );
+        let recovery = loaded.recovery.unwrap();
+        assert_eq!(fs::read(&recovery.backup).unwrap(), interrupted);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&recovery.backup), 0o600);
+        }
         assert_eq!(fs::read(&path).unwrap(), prefix);
         store.append([&changed]).unwrap();
         let recovered = Store::new(path).load(&mut AppState::default()).unwrap();

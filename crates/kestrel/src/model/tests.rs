@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     git::RepositoryInfo,
     review::{Comparison, Endpoints},
-    state::{BaseSelection, BranchList, Browsing, ComparisonChange, Destination, ProjectId, Route},
+    state::{BaseSelection, BranchList, Browsing, ComparisonChange, Destination, ProjectId},
 };
 
 struct Harness {
@@ -558,13 +558,15 @@ fn disabled_storage_does_not_disable_navigation_or_create_save_effects() {
 }
 
 #[test]
-fn append_order_not_clock_order_drives_recents_and_opening_preserves_new_tab_behavior() {
+fn append_order_drives_recents_and_new_tabs_seed_the_saved_view() {
     let mut h = Harness::persistent();
     h.comparison();
     h.context.timestamp_ms = -100;
     h.nav(Navigation::Back);
     let record = h.machine.history().recent(1).next().unwrap().clone();
     assert_eq!(record.timestamp_ms, -100);
+    let source = h.machine.state().tab(h.tab).unwrap().clone();
+    let count = h.machine.history().records().len();
     assert!(
         !h.event(Event::OpenView {
             id: record.id,
@@ -586,9 +588,24 @@ fn append_order_not_clock_order_drives_recents_and_opening_preserves_new_tab_beh
         Some(new_tab)
     );
     assert_ne!(new_tab, h.tab);
-    h.event(Event::Navigate {
-        tab: new_tab,
-        action: Navigation::Back,
-    });
-    assert_eq!(h.machine.state().tab(new_tab).unwrap().route, Route::Home);
+    assert_eq!(h.machine.state().tab(h.tab).unwrap(), &source);
+    assert_eq!(h.machine.history().records().len(), count + 1);
+    assert_eq!(
+        h.machine.history().records().last().unwrap().viewed,
+        record.viewed
+    );
+    let opened = h.machine.state().tab(new_tab).unwrap().clone();
+    assert!(!opened.can_go_back());
+    assert!(!opened.can_go_forward());
+    for action in [Navigation::Back, Navigation::Forward] {
+        assert!(
+            h.event(Event::Navigate {
+                tab: new_tab,
+                action
+            })
+            .is_empty()
+        );
+    }
+    assert_eq!(h.machine.state().tab(new_tab).unwrap(), &opened);
+    assert_eq!(h.machine.history().records().len(), count + 1);
 }

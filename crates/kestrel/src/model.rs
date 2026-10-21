@@ -33,9 +33,19 @@ pub struct SaveId(u64);
 
 #[derive(Debug)]
 pub enum Event {
-    Navigate { tab: TabId, action: Navigation },
-    OpenView { id: ViewingId, target: OpenViewIn },
+    Navigate {
+        tab: TabId,
+        action: Navigation,
+    },
+    OpenView {
+        id: ViewingId,
+        target: OpenViewIn,
+    },
     FocusWindow(WindowId),
+    /// Commit structural edits to a clone of the current state (new window or tab detach).
+    /// Surviving tabs keep their history bindings. Do not use this to load another workspace
+    /// or restore an older snapshot: reused tab/visit/activation IDs can cause later reading
+    /// updates to overwrite an unrelated history record. Such loading must reset bindings.
     Replace(AppState),
     Reopen(AppState),
     SaveRequested,
@@ -160,11 +170,15 @@ impl Model {
                     .clone();
                 self.edit(context, |state| {
                     let snapshot = viewed.snapshot_for(state)?;
-                    let tab = match target {
-                        OpenViewIn::Tab(tab) => tab,
-                        OpenViewIn::NewTab(window) => state.new_tab(window)?,
-                    };
-                    state.navigate(tab, Navigation::OpenSnapshot(snapshot))
+                    match target {
+                        OpenViewIn::Tab(tab) => {
+                            state.navigate(tab, Navigation::OpenSnapshot(snapshot))
+                        }
+                        OpenViewIn::NewTab(window) => {
+                            let tab = state.new_tab(window)?;
+                            state.navigate(tab, Navigation::SeedSnapshot(snapshot))
+                        }
+                    }
                 })
                 .map(|(_, effects)| effects)
             }

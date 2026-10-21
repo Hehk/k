@@ -126,6 +126,9 @@ fn recent_click_targets_this_tab_and_command_click_creates_a_fresh_tab(cx: &mut 
         let window = &workspace.state().windows()[0];
         assert_eq!(window.tabs.len(), 2);
         assert_ne!(window.active_tab, Some(original));
+        let opened = workspace.state().tab(window.active_tab.unwrap()).unwrap();
+        assert!(!opened.can_go_back());
+        assert!(!opened.can_go_forward());
         assert_eq!(
             workspace
                 .state()

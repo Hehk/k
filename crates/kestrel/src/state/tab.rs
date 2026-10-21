@@ -113,6 +113,15 @@ impl Tab {
         self.push_visit(route, self.snapshot()?)
     }
 
+    pub(super) fn seed_snapshot(&mut self, snapshot: Snapshot) -> Result<(), StateError> {
+        if self != &Self::new(self.id) {
+            return Err(StateError("only a new tab can be seeded"));
+        }
+        self.open_snapshot(snapshot)?;
+        self.back.clear();
+        Ok(())
+    }
+
     fn push_visit(&mut self, route: Route, before: Visit) -> Result<(), StateError> {
         let activation = self
             .activation

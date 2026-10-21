@@ -182,7 +182,11 @@ for row in CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopEleme
                 count(5)
                 click(162, 20)
                 script("key code 36 using {command down}")
-                wait_for("clock and Command-Return create a new tab", state, lambda value: len(value["windows"][0]["tabs"]) == 2)
+                opened = wait_for("clock and Command-Return create a new tab", state, lambda value: len(value["windows"][0]["tabs"]) == 2)
+                selected = opened["windows"][0]["active_tab"]
+                tab = next(tab for tab in opened["windows"][0]["tabs"] if tab["id"] == selected)
+                assert tab["back"] == [] and tab["forward"] == []
+                print("PASS saved-view tab starts without a Home history entry")
                 count(6)
                 popup()
                 capture("recent-pinned")

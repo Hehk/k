@@ -1,8 +1,11 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use thiserror::Error;
 
@@ -71,8 +74,8 @@ impl Store {
         self.loaded = false;
         // TODO: Replay eagerly for now. Long-lived journals may eventually need compaction
         // of superseded values and streaming reads, not deletion of viewing records.
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
+        let mut file = match fs::File::open(&self.path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.loaded = true;
                 self.offset = 0;
@@ -84,6 +87,9 @@ impl Store {
             }
             Err(error) => return Err(error.into()),
         };
+        make_private(&file)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
         let mut records = Vec::new();
         let mut valid = 0;
         let replay = (|| -> Result<(), Error> {
@@ -190,12 +196,12 @@ impl Store {
             return Ok(());
         }
         fs::create_dir_all(self.directory())?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&self.path)?;
+        make_private(&file)?;
         if file.metadata()?.len() != self.offset {
             return Err(Error::Changed);
         }
@@ -235,6 +241,27 @@ impl Store {
         fs::File::open(self.directory())?.sync_all()?;
         Ok(())
     }
+}
+
+fn make_private(file: &fs::File) -> Result<(), std::io::Error> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other(
+            "history journal must be a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o077 != 0 {
+            // Older journals used the process umask. Remove other users' access without
+            // expanding the owner's permissions, including intentionally read-only files.
+            permissions.set_mode(permissions.mode() & !0o077);
+            file.set_permissions(permissions)?;
+            file.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 fn check(record: &Record, count: usize) -> Result<usize, Error> {

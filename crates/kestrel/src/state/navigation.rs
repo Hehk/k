@@ -27,6 +27,8 @@ pub enum Navigation {
     SelectTab,
     ReopenTab,
     OpenSnapshot(Snapshot),
+    /// Seed a pristine tab without retaining its placeholder Home visit.
+    SeedSnapshot(Snapshot),
     SelectBranch(RefName),
     SetBranchList(BranchList),
     /// Initial resolution; explicit retargets use ComparisonLoaded with their intent.
@@ -119,6 +121,14 @@ impl AppState {
                     self.project(project)?;
                 }
                 self.tab_mut(id)?.open_snapshot(snapshot)?;
+                self.remember_tab(id);
+                ViewPolicy::Navigate
+            }
+            Navigation::SeedSnapshot(snapshot) => {
+                if let Some(project) = snapshot.project() {
+                    self.project(project)?;
+                }
+                self.tab_mut(id)?.seed_snapshot(snapshot)?;
                 self.remember_tab(id);
                 ViewPolicy::Navigate
             }
