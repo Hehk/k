@@ -1,4 +1,4 @@
-use gpui::{App, Context, Entity, Task};
+use gpui::{App, Context, Entity, Subscription};
 use kestrel::{
     git::{Branch, Repository, Snapshot},
     query::Query,
@@ -7,14 +7,16 @@ use kestrel::{
 
 use crate::workspace::Workspace;
 
+mod snapshot;
+pub use snapshot::RepositorySnapshot;
+
 pub struct RepositoryModel {
     workspace: Entity<Workspace>,
     window: WindowId,
     tab: TabId,
     project: Project,
-    snapshot: Query<Snapshot>,
-    task: Option<Task<()>>,
-    revision: u64,
+    snapshot: Entity<RepositorySnapshot>,
+    _subscription: Subscription,
 }
 
 impl RepositoryModel {
@@ -25,17 +27,18 @@ impl RepositoryModel {
         project: Project,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        let snapshot = workspace.update(cx, |workspace, cx| {
+            workspace.repository_snapshot(&project, cx)
+        });
+        let subscription = cx.observe(&snapshot, |_, _, cx| cx.notify());
+        Self {
             workspace,
             window,
             tab,
             project,
-            snapshot: Query::new(),
-            task: None,
-            revision: 0,
-        };
-        this.refresh(cx);
-        this
+            snapshot,
+            _subscription: subscription,
+        }
     }
 
     pub fn workspace(&self) -> Entity<Workspace> {
@@ -50,8 +53,8 @@ impl RepositoryModel {
         &self.project
     }
 
-    pub fn snapshot(&self) -> &Query<Snapshot> {
-        &self.snapshot
+    pub fn snapshot<'a>(&self, cx: &'a App) -> &'a Query<Snapshot> {
+        &self.snapshot.read(cx).query
     }
 
     pub fn route<'a>(&self, cx: &'a App) -> Option<&'a Route> {
@@ -66,28 +69,8 @@ impl RepositoryModel {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.revision += 1;
-        let revision = self.revision;
-        let project = self.project.clone();
-        self.snapshot.start();
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    open(&project)?
-                        .snapshot()
-                        .map_err(|error| error.to_string())
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.revision != revision || this.route(cx).is_none() {
-                    return;
-                }
-                this.snapshot.complete(result);
-                cx.notify();
-            });
-        }));
-        cx.notify();
+        self.snapshot
+            .update(cx, |snapshot, cx| snapshot.refresh(cx));
     }
 }
 

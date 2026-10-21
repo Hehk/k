@@ -1,16 +1,19 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use gpui::{AnyWindowHandle, App, Context, Entity, Global, Subscription, Task};
+use gpui::{
+    AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task, WeakEntity,
+};
 use kestrel::{
     state::{AppState, Project, Route, StateError, WindowId},
     storage::{self, Store},
 };
 
-use crate::top_bar::model::Tab;
+use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
 
 mod history;
 use history::Closed;
@@ -82,6 +85,7 @@ pub struct Workspace {
     quitting: bool,
     closed: Vec<Closed>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
+    repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -116,8 +120,30 @@ impl Workspace {
             quitting: false,
             closed: Vec::new(),
             native_windows: HashMap::new(),
+            repository_snapshots: HashMap::new(),
             _subscriptions: vec![quit, closed],
         }
+    }
+
+    pub fn repository_snapshot(
+        &mut self,
+        project: &Project,
+        cx: &mut Context<Self>,
+    ) -> Entity<RepositorySnapshot> {
+        // Views own the lifetime; remembered projects must not keep refresh workers alive.
+        self.repository_snapshots
+            .retain(|_, snapshot| snapshot.upgrade().is_some());
+        if let Some(snapshot) = self
+            .repository_snapshots
+            .get(&project.common_dir)
+            .and_then(WeakEntity::upgrade)
+        {
+            return snapshot;
+        }
+        let snapshot = cx.new(|cx| RepositorySnapshot::new(project.clone(), cx));
+        self.repository_snapshots
+            .insert(project.common_dir.clone(), snapshot.downgrade());
+        snapshot
     }
 
     pub fn state(&self) -> &AppState {

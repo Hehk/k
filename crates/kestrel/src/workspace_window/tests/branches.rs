@@ -736,6 +736,10 @@ fn list_preferences_are_independent_and_tab_shortcuts_work_from_search(cx: &mut 
         .git
         .reference("refs/heads/Alpha-new", fixture.topic, true, "fixture")
         .unwrap();
+    fixture
+        .git
+        .reference("refs/heads/topic-new", fixture.topic, true, "fixture")
+        .unwrap();
     cx.simulate_keystrokes("cmd-1");
     redraw(cx);
     assert!(cx.debug_bounds("branch:refs/heads/Alpha-new").is_none());
@@ -743,6 +747,7 @@ fn list_preferences_are_independent_and_tab_shortcuts_work_from_search(cx: &mut 
     assert!(cx.debug_bounds("branch:refs/heads/Alpha-new").is_some());
     cx.simulate_keystrokes("cmd-3");
     redraw(cx);
+    assert!(cx.debug_bounds("branch:refs/heads/topic-new").is_some());
     let saved = workspace.read_with(cx, |workspace, _| {
         workspace.state().tab(third).unwrap().clone()
     });

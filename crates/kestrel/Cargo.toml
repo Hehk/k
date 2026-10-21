@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+notify = "=8.2.0"
 
 [lints]
 workspace = true

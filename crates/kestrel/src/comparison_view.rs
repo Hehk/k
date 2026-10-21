@@ -308,7 +308,7 @@ impl ComparisonView {
     }
 
     fn refresh_review(&mut self, cx: &mut Context<Self>) {
-        if let Some(snapshot) = self.repository.read(cx).snapshot().data()
+        if let Some(snapshot) = self.repository.read(cx).snapshot(cx).data()
             && let Some(data) = self.review.data_mut()
         {
             data.fresh = snapshot.branches.iter().any(|branch| {
@@ -340,7 +340,7 @@ impl ComparisonView {
             BaseSelection::Default => self
                 .repository
                 .read(cx)
-                .snapshot()
+                .snapshot(cx)
                 .data()
                 .and_then(|snapshot| snapshot.default_base.clone()),
         };
@@ -627,7 +627,7 @@ impl ComparisonView {
                     }),
             )
             .when(
-                self.repository.read(cx).snapshot().is_refreshing(),
+                self.repository.read(cx).snapshot(cx).is_refreshing(),
                 |panel| {
                     panel.child(
                         div()
@@ -639,18 +639,19 @@ impl ComparisonView {
             .when_some(
                 self.repository
                     .read(cx)
-                    .snapshot()
+                    .snapshot(cx)
                     .error()
                     .map(str::to_owned),
                 |panel, error| panel.child(div().text_color(theme.error).child(error)),
             )
             .when(self.base_open, |picker| {
-                picker.child(match self.repository.read(cx).snapshot().data() {
+                picker.child(match self.repository.read(cx).snapshot(cx).data() {
                     Some(snapshot) => uniform_list(
                         "base-options",
                         snapshot.branches.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            let Some(snapshot) = this.repository.read(cx).snapshot().data() else {
+                            let Some(snapshot) = this.repository.read(cx).snapshot(cx).data()
+                            else {
                                 return Vec::new();
                             };
                             range

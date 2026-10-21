@@ -75,7 +75,7 @@ impl BranchView {
                     cx,
                 ),
                 InputEvent::Submit => {
-                    if let Some(snapshot) = this.repository.read(cx).snapshot().data()
+                    if let Some(snapshot) = this.repository.read(cx).snapshot(cx).data()
                         && let Some(index) = this.visible.first()
                     {
                         this.select_branch(snapshot.branches[*index].name.clone(), cx);
@@ -115,7 +115,7 @@ impl BranchView {
     }
 
     fn filter(&mut self, cx: &App) {
-        self.visible = match self.repository.read(cx).snapshot().data() {
+        self.visible = match self.repository.read(cx).snapshot(cx).data() {
             Some(snapshot) => ordered_branches(snapshot, &self.filters),
             None => Vec::new(),
         };
@@ -238,7 +238,7 @@ impl Render for BranchView {
                     },
                 )),
             );
-        let body = match self.repository.read(cx).snapshot().data() {
+        let body = match self.repository.read(cx).snapshot(cx).data() {
             None => div().child("Loading branches…").into_any_element(),
             Some(snapshot) if snapshot.branches.is_empty() => div()
                 .child("No branches yet. This repository may be empty.")
@@ -251,7 +251,7 @@ impl Render for BranchView {
                 self.visible.len(),
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     let repository = this.repository.read(cx);
-                    let Some(snapshot) = repository.snapshot().data() else {
+                    let Some(snapshot) = repository.snapshot(cx).data() else {
                         return Vec::new();
                     };
                     range
@@ -308,7 +308,7 @@ impl Render for BranchView {
             })
             .child(header)
             .when(
-                self.repository.read(cx).snapshot().is_refreshing(),
+                self.repository.read(cx).snapshot(cx).is_refreshing(),
                 |panel| {
                     panel.child(
                         div()
@@ -320,14 +320,14 @@ impl Render for BranchView {
             .when_some(
                 self.repository
                     .read(cx)
-                    .snapshot()
+                    .snapshot(cx)
                     .error()
                     .map(str::to_owned),
                 |panel, error| panel.child(div().text_color(theme.error).child(error)),
             )
             .when(
-                self.repository.read(cx).snapshot().data().is_some()
-                    || self.repository.read(cx).snapshot().error().is_none(),
+                self.repository.read(cx).snapshot(cx).data().is_some()
+                    || self.repository.read(cx).snapshot(cx).error().is_none(),
                 |panel| panel.child(body),
             )
     }
