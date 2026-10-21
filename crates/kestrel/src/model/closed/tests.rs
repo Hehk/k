@@ -1,5 +1,5 @@
 use super::*;
-use kestrel::{
+use crate::{
     git::RepositoryInfo,
     review::RefName,
     state::{Browsing, ReadingMode, Route},

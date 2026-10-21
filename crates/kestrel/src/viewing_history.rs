@@ -165,9 +165,20 @@ impl ViewingHistory {
 
     /// An acknowledgement of an older value must not clear a change made during IO.
     pub fn acknowledge(&mut self, saved: &[(u64, Record)]) {
-        for (generation, record) in saved {
-            let id = record.id.0 as usize;
-            if self.dirty.get(&id) == Some(generation) {
+        self.acknowledge_generations(
+            saved
+                .iter()
+                .map(|(generation, record)| (record.id, *generation)),
+        );
+    }
+
+    pub(crate) fn acknowledge_generations(
+        &mut self,
+        saved: impl IntoIterator<Item = (ViewingId, u64)>,
+    ) {
+        for (id, generation) in saved {
+            let id = id.0 as usize;
+            if self.dirty.get(&id) == Some(&generation) {
                 self.dirty.remove(&id);
             }
         }

@@ -9,19 +9,15 @@ use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task, WeakEntity,
 };
 use kestrel::{
+    model::{self, Effect, Event, Model, Persistence, SaveBatch, SaveResult},
     state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
     storage::{self, Store},
-    viewing_history::{
-        Foreground, Record, ViewChange, ViewingHistory, ViewingId, storage as history_storage,
-    },
+    viewing_history::{Foreground, Record, ViewingHistory, ViewingId, storage as history_storage},
 };
 
 use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
 
-mod history;
-use history::Closed;
-
-const CLOSED_HISTORY_LIMIT: usize = 100;
+pub use kestrel::model::OpenViewIn;
 
 pub struct Session(pub Entity<Workspace>);
 impl Global for Session {}
@@ -131,23 +127,12 @@ impl HistoryWriter {
     }
 }
 
-pub enum OpenViewIn {
-    Tab(TabId),
-    NewTab(WindowId),
-}
-
 pub struct Workspace {
-    state: AppState,
-    viewing_history: ViewingHistory,
+    model: Model,
     writer: Option<Arc<Mutex<Writer>>>,
     history_writer: Option<Arc<Mutex<HistoryWriter>>>,
-    revision: u64,
     save_task: Option<Task<()>>,
-    saving: bool,
-    save_error: Option<String>,
     notice: Option<String>,
-    quitting: bool,
-    closed: Vec<Closed>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
     watching_repositories: bool,
@@ -178,19 +163,20 @@ impl Workspace {
             });
         });
         Self {
-            state: loaded.state,
-            viewing_history: loaded.viewing_history,
+            model: Model::new(
+                loaded.state,
+                loaded.viewing_history,
+                Persistence {
+                    workspace: loaded.writer.is_some(),
+                    history: loaded.history_writer.is_some(),
+                },
+            ),
             writer: loaded.writer.map(|writer| Arc::new(Mutex::new(writer))),
             history_writer: loaded
                 .history_writer
                 .map(|writer| Arc::new(Mutex::new(writer))),
-            revision: 0,
             save_task: None,
-            saving: false,
-            save_error: None,
             notice: loaded.notice,
-            quitting: false,
-            closed: Vec::new(),
             native_windows: HashMap::new(),
             repository_snapshots: HashMap::new(),
             watching_repositories: false,
@@ -238,11 +224,11 @@ impl Workspace {
     }
 
     pub fn state(&self) -> &AppState {
-        &self.state
+        self.model.state()
     }
 
     pub fn viewing_history(&self) -> &ViewingHistory {
-        &self.viewing_history
+        self.model.history()
     }
 
     pub fn open_view(
@@ -250,25 +236,8 @@ impl Workspace {
         id: ViewingId,
         target: OpenViewIn,
         cx: &mut Context<Self>,
-    ) -> Result<TabId, StateError> {
-        let viewed = self
-            .viewing_history
-            .get(id)
-            .ok_or(StateError("unknown viewing record"))?
-            .viewed
-            .clone();
-        self.edit(
-            |state| {
-                let snapshot = viewed.snapshot_for(state)?;
-                let tab = match target {
-                    OpenViewIn::Tab(tab) => tab,
-                    OpenViewIn::NewTab(window) => state.new_tab(window)?,
-                };
-                state.navigate(tab, Navigation::OpenSnapshot(snapshot))?;
-                Ok(tab)
-            },
-            cx,
-        )
+    ) -> Result<(), StateError> {
+        self.dispatch(Event::OpenView { id, target }, cx)
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -276,7 +245,7 @@ impl Workspace {
     }
 
     pub fn save_error(&self) -> Option<&str> {
-        self.save_error.as_deref()
+        self.model.save_error()
     }
 
     pub fn navigate(
@@ -285,7 +254,7 @@ impl Workspace {
         action: Navigation,
         cx: &mut Context<Self>,
     ) -> Result<(), StateError> {
-        self.edit(|state| state.navigate(tab, action), cx)
+        self.dispatch(Event::Navigate { tab, action }, cx)
     }
 
     pub fn edit<R>(
@@ -293,40 +262,20 @@ impl Workspace {
         change: impl FnOnce(&mut AppState) -> Result<R, StateError>,
         cx: &mut Context<Self>,
     ) -> Result<R, StateError> {
-        if self.quitting {
-            return Err(StateError("application is quitting"));
-        }
-        let mut state = self.state.clone();
-        let (result, changes) = state.collect_view_changes(self.viewing_foreground(), change)?;
-        self.commit(state, changes, cx);
-        Ok(result)
+        let (value, effects) = self.model.edit(self.context(), change)?;
+        self.run_effects(effects, cx);
+        Ok(value)
     }
 
     pub fn replace(&mut self, state: AppState, cx: &mut Context<Self>) {
-        self.commit(state, Vec::new(), cx);
+        self.dispatch(Event::Replace(state), cx)
+            .expect("replacement cannot fail");
     }
 
-    fn commit(&mut self, state: AppState, changes: Vec<ViewChange>, cx: &mut Context<Self>) {
-        if self.quitting {
-            return;
-        }
-        let viewed = self.viewing_history.apply(changes, || {
-            match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(duration) => duration.as_millis() as i64,
-                Err(error) => -(error.duration().as_millis() as i64),
-            }
-        });
-        self.viewing_history.retain_live_bindings(&state);
-        if self.state == state && !viewed {
-            return;
-        }
-        self.closed.extend(Closed::removed(&self.state, &state));
-        let excess = self.closed.len().saturating_sub(CLOSED_HISTORY_LIMIT);
-        self.closed.drain(..excess);
-        self.state = state;
-        self.revision += 1;
-        self.save(cx);
-        cx.notify();
+    fn dispatch(&mut self, event: Event, cx: &mut Context<Self>) -> Result<(), StateError> {
+        let effects = self.model.transition(event, self.context())?;
+        self.run_effects(effects, cx);
+        Ok(())
     }
 
     pub fn close_window(&mut self, id: WindowId, cx: &mut Context<Self>) {
@@ -334,7 +283,7 @@ impl Workspace {
         if self.foreground == Some(id) {
             self.foreground = None;
         }
-        if !self.quitting {
+        if !self.model.stopped() {
             let _ = self.edit(
                 |state| {
                     state.close_window(id);
@@ -346,51 +295,36 @@ impl Workspace {
     }
 
     pub fn can_reopen(&self) -> bool {
-        !self.quitting && !self.closed.is_empty()
+        self.model.can_reopen()
     }
 
     pub fn reopen_state(
         &self,
         target: Option<WindowId>,
     ) -> Result<Option<(AppState, WindowId)>, StateError> {
-        if self.quitting {
-            return Err(StateError("application is quitting"));
-        }
-        let Some(closed) = self.closed.last() else {
-            return Ok(None);
-        };
-        let mut state = self.state.clone();
-        let id = closed.restore(&mut state, target)?;
-        Ok(Some((state, id)))
+        self.model.reopen_state(target)
     }
 
     pub fn finish_reopen(
         &mut self,
-        mut state: AppState,
+        state: AppState,
         cx: &mut Context<Self>,
     ) -> Result<(), StateError> {
-        if self.quitting {
-            return Err(StateError("application is quitting"));
-        }
-        let (_, changes) = state.collect_view_changes(self.viewing_foreground(), |state| {
-            let tab = state
-                .active_window()
-                .and_then(|id| state.window(id).ok())
-                .and_then(|window| window.active_tab)
-                .ok_or(StateError("reopened container has no active tab"))?;
-            state.navigate(tab, Navigation::ReopenTab)
-        })?;
-        self.closed.pop();
-        self.commit(state, changes, cx);
-        Ok(())
+        self.dispatch(Event::Reopen(state), cx)
     }
 
-    fn viewing_foreground(&self) -> Foreground {
-        if self.native_windows.is_empty() {
-            Foreground::SelectedWindow
-        } else {
-            self.foreground
-                .map_or(Foreground::Hidden, Foreground::Window)
+    fn context(&self) -> model::Context {
+        model::Context {
+            foreground: if self.native_windows.is_empty() {
+                Foreground::SelectedWindow
+            } else {
+                self.foreground
+                    .map_or(Foreground::Hidden, Foreground::Window)
+            },
+            timestamp_ms: match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as i64,
+                Err(error) => -(error.duration().as_millis() as i64),
+            },
         }
     }
 
@@ -405,9 +339,10 @@ impl Workspace {
         if active {
             let changed = self.foreground != Some(id);
             self.foreground = Some(id);
-            if (changed || self.state.active_window() != Some(id)) && self.state.window(id).is_ok()
+            if (changed || self.state().active_window() != Some(id))
+                && self.state().window(id).is_ok()
             {
-                let _ = self.edit(|state| state.focus_window(id), cx);
+                let _ = self.dispatch(Event::FocusWindow(id), cx);
             }
         } else if self.foreground == Some(id) {
             self.foreground = None;
@@ -421,7 +356,7 @@ impl Workspace {
     }
 
     pub fn tabs(&self, id: WindowId) -> (Vec<Tab>, Option<u64>) {
-        let Ok(window) = self.state.window(id) else {
+        let Ok(window) = self.state().window(id) else {
             return (Vec::new(), None);
         };
         let tabs = window
@@ -429,134 +364,112 @@ impl Workspace {
             .iter()
             .map(|tab| Tab {
                 id: tab.id.as_u64(),
-                title: tab_title(&self.state, tab),
+                title: tab_title(self.state(), tab),
             })
             .collect();
         (tabs, window.active_tab.map(|id| id.as_u64()))
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let writer = self.writer.clone();
-        let history_writer = self.history_writer.clone();
-        // Debounce before capturing data. Once IO starts, keep that task alive: dropping an
-        // incremental batch like an obsolete whole-state snapshot could lose new record IDs.
-        if self.quitting || self.saving || (writer.is_none() && history_writer.is_none()) {
-            return;
-        }
-        self.save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            let Ok(Some((state, records, revision))) = this.update(cx, |this, _| {
-                if this.quitting {
-                    return None;
-                }
-                this.saving = true;
-                let records = if this.history_writer.is_some() {
-                    this.viewing_history.pending()
-                } else {
-                    Vec::new()
-                };
-                Some((this.state.clone(), records, this.revision))
-            }) else {
-                return;
-            };
-            let (records, history_saved, errors) = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut errors = Vec::new();
-                    let mut history_saved = false;
-                    // The files remain independent. Always attempt history even if workspace
-                    // saving fails; only one batch runs at a time, and failed changes stay dirty.
-                    if let Some(writer) = writer {
-                        let result = writer.lock().map_err(|error| error.to_string()).and_then(
-                            |mut writer| {
-                                writer
-                                    .save(revision, &state)
-                                    .map_err(|error| error.to_string())
-                            },
-                        );
-                        if let Err(error) = result {
-                            errors.push(format!("Workspace: {error}"));
-                        }
-                    }
-                    if let Some(writer) = history_writer {
-                        let result = writer.lock().map_err(|error| error.to_string()).and_then(
-                            |mut writer| writer.save(&records).map_err(|error| error.to_string()),
-                        );
-                        match result {
-                            Ok(()) => history_saved = true,
-                            Err(error) => errors.push(format!("Viewing history: {error}")),
-                        }
-                    }
-                    (records, history_saved, errors)
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.finish_save(revision, &records, history_saved, errors, cx);
-            });
-        }));
+        self.dispatch(Event::SaveRequested, cx)
+            .expect("save request cannot fail");
     }
 
-    fn finish_save(
-        &mut self,
-        revision: u64,
-        records: &[(u64, Record)],
-        history_saved: bool,
-        errors: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.quitting {
-            return;
+    fn run_effects(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                Effect::Changed => cx.notify(),
+                Effect::ScheduleSave(id) => {
+                    self.save_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.dispatch(Event::SaveDue(id), cx));
+                    }));
+                }
+                Effect::Save(batch) => {
+                    let writer = self.writer.clone();
+                    let history_writer = self.history_writer.clone();
+                    self.save_task = Some(cx.spawn(async move |this, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(
+                                async move { write_batch(*batch, writer, history_writer, false) },
+                            )
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.dispatch(Event::Saved(result), cx));
+                    }));
+                }
+                Effect::Flush(_) => unreachable!("quit effects are handled synchronously"),
+            }
         }
-        self.saving = false;
-        if history_saved {
-            self.viewing_history.acknowledge(records);
-        }
-        self.save_error = if errors.is_empty() {
-            None
-        } else {
-            Some(errors.join("\n"))
-        };
-        if self.revision != revision {
-            self.save(cx);
-        }
-        cx.notify();
     }
 
     fn flush_on_quit(&mut self) {
-        if self.quitting {
-            return;
-        }
-        self.quitting = true;
-        self.save_task.take();
-        if let Some(writer) = &self.writer {
-            // GPUI allows only 100 ms for async quit hooks. Finish this write before teardown.
-            match writer.lock() {
-                Ok(mut writer) => {
-                    if let Err(error) = writer.save(self.revision, &self.state) {
-                        eprintln!("Could not save workspace on quit: {error}");
-                    }
-                    writer.closed = true;
-                }
-                Err(error) => eprintln!("Could not save workspace on quit: {error}"),
+        let effects = self
+            .model
+            .transition(Event::Quit, self.context())
+            .expect("quit cannot fail");
+        for effect in effects {
+            let Effect::Flush(batch) = effect else {
+                unreachable!("quit only emits the final flush");
+            };
+            self.save_task.take();
+            // GPUI allows only 100 ms for async quit hooks. The mutexes order this
+            // final write after in-flight IO; closing fences workers not yet started.
+            let result = write_batch(
+                *batch,
+                self.writer.clone(),
+                self.history_writer.clone(),
+                true,
+            );
+            self.model
+                .transition(Event::Saved(result), self.context())
+                .expect("save completion cannot fail");
+            if let Some(error) = self.save_error() {
+                eprintln!("Could not save on quit: {error}");
             }
         }
-        if let Some(writer) = &self.history_writer {
-            // Unacknowledged in-flight records remain dirty. The lock orders this final batch
-            // after an append already running; closing fences one that has not started yet.
-            let records = self.viewing_history.pending();
-            match writer.lock() {
-                Ok(mut writer) => {
-                    match writer.save(&records) {
-                        Ok(()) => self.viewing_history.acknowledge(&records),
-                        Err(error) => eprintln!("Could not save viewing history on quit: {error}"),
-                    }
-                    writer.closed = true;
-                }
-                Err(error) => eprintln!("Could not save viewing history on quit: {error}"),
-            }
-        }
+    }
+}
+
+fn write_batch(
+    batch: SaveBatch,
+    writer: Option<Arc<Mutex<Writer>>>,
+    history_writer: Option<Arc<Mutex<HistoryWriter>>>,
+    closing: bool,
+) -> SaveResult {
+    let workspace = batch.workspace.map(|state| {
+        writer
+            .as_ref()
+            .expect("workspace persistence has a writer")
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|mut writer| {
+                let result = writer
+                    .save(batch.revision, &state)
+                    .map_err(|error| error.to_string());
+                writer.closed |= closing;
+                result
+            })
+    });
+    // Independent files: always attempt history even if the workspace write failed.
+    let history = batch.history.map(|records| {
+        history_writer
+            .as_ref()
+            .expect("history persistence has a writer")
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|mut writer| {
+                let result = writer.save(&records).map_err(|error| error.to_string());
+                writer.closed |= closing;
+                result
+            })
+    });
+    SaveResult {
+        id: batch.id,
+        workspace,
+        history,
     }
 }
 

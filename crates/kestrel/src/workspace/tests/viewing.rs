@@ -38,7 +38,7 @@ fn viewing_decisions_commit_atomically_and_are_not_in_the_workspace_snapshot(
         let before = workspace.state().clone();
         let records = workspace.viewing_history().records().to_vec();
         assert_eq!(records.len(), 1);
-        let revision = workspace.revision;
+        let revision = workspace.model.revision();
         assert!(
             workspace
                 .edit(
@@ -53,7 +53,7 @@ fn viewing_decisions_commit_atomically_and_are_not_in_the_workspace_snapshot(
         );
         assert_eq!(workspace.state(), &before);
         assert_eq!(workspace.viewing_history().records(), records);
-        assert_eq!(workspace.revision, revision);
+        assert_eq!(workspace.model.revision(), revision);
         workspace
             .edit(|state| state.focus_window(window), cx)
             .unwrap();
@@ -166,9 +166,17 @@ fn a_saved_view_opens_in_the_requested_tab_or_a_new_tab_after_its_source_is_clos
                 cx,
             )
             .unwrap();
-        let new = workspace
+        workspace
             .open_view(record.id, OpenViewIn::NewTab(window), cx)
             .unwrap();
+        let new = workspace
+            .state()
+            .window(window)
+            .unwrap()
+            .tabs
+            .last()
+            .unwrap()
+            .id;
         assert_ne!(new, source);
         assert_eq!(
             workspace.state().window(window).unwrap().active_tab,
@@ -186,11 +194,12 @@ fn a_saved_view_opens_in_the_requested_tab_or_a_new_tab_after_its_source_is_clos
         );
         assert_eq!(workspace.state().tab(home).unwrap().route, Route::Home);
         workspace.navigate(home, Navigation::SelectTab, cx).unwrap();
+        workspace
+            .open_view(record.id, OpenViewIn::Tab(home), cx)
+            .unwrap();
         assert_eq!(
-            workspace
-                .open_view(record.id, OpenViewIn::Tab(home), cx)
-                .unwrap(),
-            home
+            workspace.state().window(window).unwrap().active_tab,
+            Some(home)
         );
         assert_eq!(
             workspace

@@ -46,10 +46,10 @@ fn history_only_changes_schedule_a_save_and_quit_fences_pending_writers(cx: &mut
     assert_eq!(saved_history(dir.path()).records().len(), 1);
     workspace.update(cx, |workspace, cx| {
         let before = workspace.state().clone();
-        let revision = workspace.revision;
+        let revision = workspace.model.revision();
         workspace.navigate(tab, Navigation::ReopenTab, cx).unwrap();
         assert_eq!(workspace.state(), &before);
-        assert_eq!(workspace.revision, revision + 1);
+        assert_eq!(workspace.model.revision(), revision + 1);
     });
     finish_saving(cx);
     assert_eq!(saved_history(dir.path()).records().len(), 2);
@@ -71,12 +71,15 @@ fn failed_history_batches_retain_new_ids_until_a_successful_retry(cx: &mut TestA
     fs::create_dir(&path).unwrap();
     finish_saving(cx);
     workspace.update(cx, |workspace, cx| {
-        assert_eq!(workspace.viewing_history.pending().len(), 1);
+        assert_eq!(workspace.viewing_history().pending().len(), 1);
         workspace.navigate(tab, Navigation::ReopenTab, cx).unwrap();
     });
     finish_saving(cx);
     assert_eq!(
-        workspace.read_with(cx, |workspace, _| workspace.viewing_history.pending().len()),
+        workspace.read_with(cx, |workspace, _| workspace
+            .viewing_history()
+            .pending()
+            .len()),
         2
     );
     fs::remove_dir(&path).unwrap();
@@ -84,7 +87,7 @@ fn failed_history_batches_retain_new_ids_until_a_successful_retry(cx: &mut TestA
     finish_saving(cx);
     assert_eq!(saved_history(dir.path()).records().len(), 2);
     workspace.update(cx, |workspace, _| {
-        assert!(workspace.viewing_history.pending().is_empty());
+        assert!(workspace.viewing_history().pending().is_empty());
         workspace.flush_on_quit();
         assert!(
             workspace
@@ -99,6 +102,26 @@ fn failed_history_batches_retain_new_ids_until_a_successful_retry(cx: &mut TestA
     assert_eq!(saved_history(dir.path()).records().len(), 2);
 }
 
+fn capture(workspace: &mut Workspace) -> SaveBatch {
+    workspace.save_task.take();
+    let context = workspace.context();
+    let effects = workspace
+        .model
+        .transition(Event::SaveRequested, context)
+        .unwrap();
+    let [Effect::ScheduleSave(id)] = effects.as_slice() else {
+        panic!("expected debounce")
+    };
+    let mut effects = workspace
+        .model
+        .transition(Event::SaveDue(*id), context)
+        .unwrap();
+    let Effect::Save(batch) = effects.remove(0) else {
+        panic!("expected save")
+    };
+    *batch
+}
+
 #[gpui::test]
 fn amendments_during_io_survive_acknowledgement_and_follow_the_earlier_batch(
     cx: &mut TestAppContext,
@@ -106,10 +129,7 @@ fn amendments_during_io_survive_acknowledgement_and_follow_the_earlier_batch(
     let (dir, workspace, tab) = setup(cx);
     workspace.update(cx, |workspace, cx| {
         // Pause at the worker's capture boundary, then exercise its real completion handler.
-        workspace.save_task.take();
-        workspace.saving = true;
-        let revision = workspace.revision;
-        let captured = workspace.viewing_history.pending();
+        let captured = capture(workspace);
         workspace
             .navigate(
                 tab,
@@ -125,16 +145,14 @@ fn amendments_during_io_survive_acknowledgement_and_follow_the_earlier_batch(
             workspace.save_task.is_none(),
             "do not replace an in-flight worker"
         );
-        workspace
-            .history_writer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .save(&captured)
-            .unwrap();
-        workspace.finish_save(revision, &captured, true, Vec::new(), cx);
-        assert_eq!(workspace.viewing_history.pending().len(), 2);
+        let result = write_batch(
+            captured,
+            workspace.writer.clone(),
+            workspace.history_writer.clone(),
+            false,
+        );
+        workspace.dispatch(Event::Saved(result), cx).unwrap();
+        assert_eq!(workspace.viewing_history().pending().len(), 2);
     });
     let prefix = fs::read(dir.path().join("state.history.jsonl")).unwrap();
     finish_saving(cx);
@@ -144,8 +162,8 @@ fn amendments_during_io_survive_acknowledgement_and_follow_the_earlier_batch(
             .starts_with(&prefix)
     );
     let records = workspace.read_with(cx, |workspace, _| {
-        assert!(workspace.viewing_history.pending().is_empty());
-        workspace.viewing_history.records().to_vec()
+        assert!(workspace.viewing_history().pending().is_empty());
+        workspace.viewing_history().records().to_vec()
     });
     assert_eq!(saved_history(dir.path()).records(), records);
     assert_eq!(records.len(), 2);
@@ -156,10 +174,7 @@ fn amendments_during_io_survive_acknowledgement_and_follow_the_earlier_batch(
 fn quit_saves_latest_pending_values_and_fences_an_old_captured_batch(cx: &mut TestAppContext) {
     let (dir, workspace, tab) = setup(cx);
     workspace.update(cx, |workspace, cx| {
-        workspace.save_task.take();
-        workspace.saving = true;
-        let revision = workspace.revision;
-        let captured = workspace.viewing_history.pending();
+        let captured = capture(workspace);
         workspace
             .navigate(
                 tab,
@@ -172,19 +187,17 @@ fn quit_saves_latest_pending_values_and_fences_an_old_captured_batch(cx: &mut Te
             .unwrap();
         workspace.navigate(tab, Navigation::ReopenTab, cx).unwrap();
         workspace.flush_on_quit();
-        workspace
-            .history_writer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .save(&captured)
-            .unwrap();
-        workspace.finish_save(revision, &captured, true, Vec::new(), cx);
-        assert!(workspace.viewing_history.pending().is_empty());
+        let result = write_batch(
+            captured,
+            workspace.writer.clone(),
+            workspace.history_writer.clone(),
+            false,
+        );
+        workspace.dispatch(Event::Saved(result), cx).unwrap();
+        assert!(workspace.viewing_history().pending().is_empty());
     });
     let records = workspace.read_with(cx, |workspace, _| {
-        workspace.viewing_history.records().to_vec()
+        workspace.viewing_history().records().to_vec()
     });
     assert_eq!(saved_history(dir.path()).records(), records);
 }
@@ -216,7 +229,10 @@ fn workspace_only_edits_do_not_append_and_view_updates_coalesce(cx: &mut TestApp
     }
     assert_eq!(fs::read(&path).unwrap(), prefix);
     assert_eq!(
-        workspace.read_with(cx, |workspace, _| workspace.viewing_history.pending().len()),
+        workspace.read_with(cx, |workspace, _| workspace
+            .viewing_history()
+            .pending()
+            .len()),
         1
     );
     finish_saving(cx);
