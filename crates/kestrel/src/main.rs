@@ -87,6 +87,9 @@ fn main() {
         appearance::install(cx);
         let workspace = cx.new(|cx| Workspace::new(loaded, cx));
         cx.set_global(Session(workspace.clone()));
+        workspace.update(cx, |workspace, cx| {
+            workspace.start_watching_repositories(cx)
+        });
         commands::install(cx);
         let windows = workspace
             .read(cx)

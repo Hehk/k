@@ -86,6 +86,7 @@ pub struct Workspace {
     closed: Vec<Closed>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
+    watching_repositories: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -121,7 +122,22 @@ impl Workspace {
             closed: Vec::new(),
             native_windows: HashMap::new(),
             repository_snapshots: HashMap::new(),
+            watching_repositories: false,
             _subscriptions: vec![quit, closed],
+        }
+    }
+
+    pub fn start_watching_repositories(&mut self, cx: &mut Context<Self>) {
+        if self.watching_repositories {
+            return;
+        }
+        self.watching_repositories = true;
+        for snapshot in self
+            .repository_snapshots
+            .values()
+            .filter_map(WeakEntity::upgrade)
+        {
+            snapshot.update(cx, |snapshot, cx| snapshot.start_watching(cx));
         }
     }
 
@@ -141,6 +157,9 @@ impl Workspace {
             return snapshot;
         }
         let snapshot = cx.new(|cx| RepositorySnapshot::new(project.clone(), cx));
+        if self.watching_repositories {
+            snapshot.update(cx, |snapshot, cx| snapshot.start_watching(cx));
+        }
         self.repository_snapshots
             .insert(project.common_dir.clone(), snapshot.downgrade());
         snapshot

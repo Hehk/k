@@ -7,7 +7,9 @@ use kestrel::{
 
 use crate::workspace::Workspace;
 
+mod refresh;
 mod snapshot;
+mod watch;
 pub use snapshot::RepositorySnapshot;
 
 pub struct RepositoryModel {
@@ -55,6 +57,10 @@ impl RepositoryModel {
 
     pub fn snapshot<'a>(&self, cx: &'a App) -> &'a Query<Snapshot> {
         &self.snapshot.read(cx).query
+    }
+
+    pub fn watch_error<'a>(&self, cx: &'a App) -> Option<&'a str> {
+        self.snapshot.read(cx).watch_error.as_deref()
     }
 
     pub fn route<'a>(&self, cx: &'a App) -> Option<&'a Route> {

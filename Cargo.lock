@@ -2914,6 +2914,7 @@ dependencies = [
 name = "kestrel"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "block",
  "diff",
  "dirs 5.0.1",

@@ -146,6 +146,138 @@ fn refresh_keeps_snapshot_until_replacement_is_ready(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn explicit_startup_wires_native_events_without_changing_pinned_state(cx: &mut TestAppContext) {
+    for start_before_model in [false, true] {
+        verify_native_refresh(cx, start_before_model);
+    }
+}
+
+fn verify_native_refresh(cx: &mut TestAppContext, start_before_model: bool) {
+    let fixture = Fixture::new(cx);
+    let tip = fixture.commit();
+    fixture
+        .git
+        .reference("refs/heads/main", tip, true, "fixture")
+        .unwrap();
+    let comparison = Repository::open(fixture.git.workdir().unwrap())
+        .unwrap()
+        .compare(&"refs/heads/topic".into(), &"refs/heads/main".into())
+        .unwrap();
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    state.select_branch(fixture.tab, "refs/heads/topic".into())?;
+                    state.set_comparison(
+                        fixture.tab,
+                        kestrel::state::BaseSelection::Explicit("refs/heads/main".into()),
+                        comparison,
+                    )
+                },
+                cx,
+            )
+            .unwrap();
+    });
+    if start_before_model {
+        fixture.workspace.update(cx, |workspace, cx| {
+            workspace.start_watching_repositories(cx)
+        });
+    }
+    let repository = fixture.model(cx);
+    cx.run_until_parked();
+    let snapshot = repository.read_with(cx, |repository, _| repository.snapshot.clone());
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace.start_watching_repositories(cx);
+        workspace.start_watching_repositories(cx);
+    });
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let before = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.state().clone());
+    fixture
+        .git
+        .reference("refs/heads/added", tip, true, "fixture")
+        .unwrap();
+    fixture
+        .git
+        .find_reference("refs/heads/topic")
+        .unwrap()
+        .delete()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(20));
+        let updated = snapshot.read_with(cx, |snapshot, _| {
+            snapshot
+                .query
+                .data()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.name.0 == b"refs/heads/added")
+        });
+        if updated {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native event did not refresh the snapshot"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    snapshot.read_with(cx, |snapshot, _| {
+        assert!(
+            !snapshot
+                .query
+                .data()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.name.0 == b"refs/heads/topic")
+        );
+        assert!(
+            snapshot
+                .query
+                .data()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.name.0 == b"refs/heads/added")
+        );
+    });
+    assert_eq!(
+        fixture
+            .workspace
+            .read_with(cx, |workspace, _| workspace.state().clone()),
+        before
+    );
+}
+
+#[gpui::test]
+fn watcher_setup_failure_preserves_readable_snapshot_data(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let repository = fixture.model(cx);
+    cx.run_until_parked();
+    std::fs::rename(
+        fixture.dir.path().join("repo"),
+        fixture.dir.path().join("moved"),
+    )
+    .unwrap();
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace.start_watching_repositories(cx)
+    });
+    cx.run_until_parked();
+    repository.read_with(cx, |repository, cx| {
+        assert!(repository.watch_error(cx).is_some());
+        assert!(repository.snapshot(cx).data().is_some());
+        assert!(repository.snapshot(cx).error().is_none());
+    });
+}
+
+#[gpui::test]
 fn tabs_and_linked_worktrees_share_snapshot_without_retaining_it_after_close(
     cx: &mut TestAppContext,
 ) {
