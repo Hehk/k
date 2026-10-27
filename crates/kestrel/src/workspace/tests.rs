@@ -5,6 +5,9 @@ use kestrel::{git::RepositoryInfo, review::RefName};
 
 use super::*;
 
+mod persistence;
+mod viewing;
+
 fn project(state: &mut AppState, name: &str) -> kestrel::state::ProjectId {
     let directory = std::env::temp_dir().join(name);
     state
@@ -191,7 +194,12 @@ fn failed_startup_load_disables_writes_without_losing_the_original() {
     let dir = tempfile::tempdir().unwrap();
     let loaded = LoadedWorkspace::load(Ok(Store::new(dir.path().to_owned())));
     assert!(loaded.writer.is_none());
-    assert!(loaded.notice.unwrap().contains("Saving is disabled"));
+    assert!(
+        loaded
+            .notice
+            .unwrap()
+            .contains("Workspace saving is disabled")
+    );
     assert!(dir.path().is_dir());
 }
 
@@ -219,6 +227,7 @@ fn failed_edits_leave_the_workspace_and_save_schedule_unchanged(cx: &mut TestApp
 
 #[gpui::test]
 fn closed_history_is_bounded_transactional_and_not_persisted(cx: &mut TestAppContext) {
+    const CLOSED_HISTORY_LIMIT: usize = 100;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
     let loaded = LoadedWorkspace::load(Ok(Store::new(path.clone())));
@@ -246,14 +255,14 @@ fn closed_history_is_bounded_transactional_and_not_persisted(cx: &mut TestAppCon
                 )
                 .unwrap();
         }
-        assert_eq!(workspace.closed.len(), CLOSED_HISTORY_LIMIT);
+        assert_eq!(workspace.model.closed_count(), CLOSED_HISTORY_LIMIT);
         let before = workspace.state().clone();
-        let revision = workspace.revision;
+        let revision = workspace.model.revision();
         let (_, restored) = workspace.reopen_state(Some(window)).unwrap().unwrap();
         assert_eq!(restored, window);
         assert_eq!(workspace.state(), &before);
-        assert_eq!(workspace.revision, revision);
-        assert_eq!(workspace.closed.len(), CLOSED_HISTORY_LIMIT);
+        assert_eq!(workspace.model.revision(), revision);
+        assert_eq!(workspace.model.closed_count(), CLOSED_HISTORY_LIMIT);
         workspace.flush_on_quit();
         assert!(!workspace.can_reopen());
         assert!(workspace.reopen_state(None).is_err());

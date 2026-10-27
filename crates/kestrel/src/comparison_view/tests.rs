@@ -311,6 +311,93 @@ fn data(base: &str) -> ReviewData {
 }
 
 #[gpui::test]
+fn returning_to_the_same_visit_rejects_its_old_request_before_observers_run(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, workspace, tab, repository) = setup(cx);
+    let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));
+    view.update(cx, |view, cx| {
+        view.load_review(Some("refs/heads/main".into()), false, cx);
+        let revision = view.review_revision;
+        let key = view.current_key(cx).unwrap();
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .edit(
+                    |state| {
+                        state.go_back(tab)?;
+                        state.go_forward(tab)
+                    },
+                    cx,
+                )
+                .unwrap();
+        });
+        let before = workspace.read(cx).state().clone();
+        assert_eq!(view.review_revision, revision);
+        view.finish_review(
+            revision,
+            key,
+            BaseSelection::Default,
+            Ok(data("refs/heads/main")),
+            cx,
+        );
+        assert_eq!(workspace.read(cx).state(), &before);
+        assert!(view.current_key(cx).unwrap().comparison.is_none());
+    });
+}
+
+#[gpui::test]
+fn selecting_the_same_file_preserves_position_and_missing_files_are_not_substituted(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, workspace, tab, repository) = setup(cx);
+    workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    state.set_comparison(
+                        tab,
+                        BaseSelection::Default,
+                        data("refs/heads/main").comparison,
+                    )?;
+                    state.set_browsing(
+                        tab,
+                        &"refs/heads/topic".into(),
+                        Browsing {
+                            file: Some("missing.rs".into()),
+                            first_visible_line: 45,
+                            ..Default::default()
+                        },
+                    )
+                },
+                cx,
+            )
+            .unwrap();
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));
+    view.update(cx, |view, cx| {
+        let before = workspace.read(cx).state().clone();
+        view.select_file("missing.rs".into(), cx);
+        assert_eq!(workspace.read(cx).state(), &before);
+        let mut loaded = data("refs/heads/main");
+        loaded.changes.push(FileChange::Added {
+            new: kestrel::review::FileEntry {
+                path: "different.rs".into(),
+                id: loaded.comparison.commits.new,
+                mode: 0o100644,
+            },
+        });
+        view.review.complete(Ok(loaded));
+        view.load_patch(cx);
+        assert!(
+            view.patch
+                .error()
+                .is_some_and(|error| error.contains("saved file"))
+        );
+        assert_eq!(workspace.read(cx).state(), &before);
+    });
+}
+
+#[gpui::test]
 fn late_comparisons_cannot_navigate_or_overwrite_another_branch(cx: &mut TestAppContext) {
     let (_dir, workspace, tab, repository) = setup(cx);
     let (view, cx) = cx.add_window_view(|_, cx| ComparisonView::new(repository, cx));

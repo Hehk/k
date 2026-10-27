@@ -5,18 +5,17 @@ use std::sync::Arc;
 
 use diff::{Cancellation, Engine};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window, div, prelude::*, px,
-    uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ScrollStrategy, Subscription, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use kestrel::{
     query::{Query, QueryResult},
     review::{Comparison, DiffLine, FileChange, FilePatch, GitPath, PreviewUnavailable, RefName},
-    state::{BaseSelection, Browsing, RepositoryPage, Route},
+    state::{BaseSelection, Browsing, ComparisonChange, Navigation, RepositoryPage, Route},
 };
 
 use crate::{
     appearance::{DiffTone, Theme},
-    commands::Command,
     controls::{control, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{RepositoryModel, branch_label, open},
@@ -54,12 +53,15 @@ pub struct ComparisonView {
     review: Query<ReviewData>,
     review_task: Option<Task<()>>,
     review_revision: u64,
+    review_change: ComparisonChange,
     patch_key: Option<FileChange>,
     patch: Query<LoadedPatch>,
     patch_task: Option<PendingPatch>,
     engine: Arc<Engine>,
     patch_revision: u64,
     selection: Option<(Entity<DiffSelection>, [Subscription; 2])>,
+    scroll: UniformListScrollHandle,
+    synced_scroll_row: u32,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -72,6 +74,7 @@ impl Focusable for ComparisonView {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReviewKey {
+    activation: u64,
     branch: RefName,
     base: BaseSelection,
     comparison: Option<Comparison>,
@@ -239,6 +242,11 @@ impl FileLabel {
 }
 
 impl ComparisonView {
+    #[cfg(test)]
+    pub fn freshness(&self) -> Option<bool> {
+        self.review.data().map(|data| data.fresh)
+    }
+
     pub fn new(repository: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let workspace = repository.read(cx).workspace();
         let subscriptions = vec![
@@ -256,12 +264,15 @@ impl ComparisonView {
             review: Query::new(),
             review_task: None,
             review_revision: 0,
+            review_change: ComparisonChange::Resolve,
             patch_key: None,
             patch: Query::new(),
             patch_task: None,
             engine: Arc::new(Engine::bundled()),
             patch_revision: 0,
             selection: None,
+            scroll: UniformListScrollHandle::new(),
+            synced_scroll_row: 0,
             error: None,
             _subscriptions: subscriptions,
         };
@@ -300,7 +311,16 @@ impl ComparisonView {
             return None;
         };
         let review = review.active_review()?;
+        let repository = self.repository.read(cx);
+        let activation = repository
+            .workspace()
+            .read(cx)
+            .state()
+            .tab(repository.tab())
+            .ok()?
+            .activation();
         Some(ReviewKey {
+            activation,
             branch: review.branch.clone(),
             base: review.base.clone(),
             comparison: review.comparison.clone(),
@@ -350,6 +370,13 @@ impl ComparisonView {
             return;
         }
         self.review_revision += 1;
+        self.review_change = if latest {
+            ComparisonChange::LoadLatest
+        } else if override_base.is_some() {
+            ComparisonChange::ChangeBase
+        } else {
+            ComparisonChange::Resolve
+        };
         let revision = self.review_revision;
         self.patch_revision += 1;
         self.patch_task.take();
@@ -413,19 +440,21 @@ impl ComparisonView {
                 let repository = self.repository.read(cx);
                 let tab = repository.tab();
                 let result = repository.workspace().update(cx, |workspace, cx| {
-                    workspace.edit(
-                        |state| state.set_comparison(tab, base.clone(), comparison.clone()),
+                    workspace.navigate(
+                        tab,
+                        Navigation::ComparisonLoaded {
+                            activation: key.activation,
+                            change: self.review_change,
+                            base: base.clone(),
+                            comparison: comparison.clone(),
+                        },
                         cx,
                     )
                 });
                 if let Err(error) = result {
                     self.review.complete(Err(error.to_string()));
                 } else {
-                    self.review_key = Some(ReviewKey {
-                        branch: comparison.branch.clone(),
-                        base,
-                        comparison: Some(comparison),
-                    });
+                    self.review_key = self.current_key(cx);
                     self.review.complete(Ok(data));
                     self.load_patch(cx);
                 }
@@ -445,32 +474,38 @@ impl ComparisonView {
         if key.comparison.as_ref() != Some(&data.comparison) {
             return;
         }
-        let browsing = self
-            .repository
-            .read(cx)
-            .route(cx)
-            .and_then(Route::review)
-            .and_then(|review| review.active_review())
-            .map(|review| review.browsing.clone())
-            .unwrap_or_default();
-        let change = data
-            .changes
-            .iter()
-            .find(|change| Some(path(change)) == browsing.file.as_ref())
-            .or(data.changes.first())
-            .cloned();
-        if self.patch_key == change {
+        let browsing = self.browsing(cx).cloned().unwrap_or_default();
+        let change = match &browsing.file {
+            Some(selected) => data.changes.iter().find(|change| path(change) == selected),
+            None => data.changes.first(),
+        }
+        .cloned();
+        let Some(change) = change else {
+            self.patch_revision += 1;
+            self.patch_task.take();
+            self.patch_key = None;
+            self.selection = None;
+            self.patch = Query::new();
+            if browsing.file.is_some() {
+                self.patch.complete(Err(
+                    "The saved file is not in this comparison. Choose another file.".into(),
+                ));
+            }
+            return;
+        };
+        if self.patch_key.as_ref() == Some(&change) {
+            if self.synced_scroll_row != browsing.first_visible_line {
+                self.restore_scroll(browsing.first_visible_line);
+            }
             return;
         }
         self.patch_revision += 1;
         self.patch_task.take();
-        self.patch_key = change.clone();
+        self.patch_key = Some(change.clone());
         self.selection = None;
         self.patch = Query::new();
-        let Some(change) = change else {
-            return;
-        };
         self.patch.start();
+        self.scroll = UniformListScrollHandle::new();
         if browsing.file.as_ref() != Some(path(&change)) {
             self.select_file(path(&change).clone(), cx);
         }
@@ -526,6 +561,10 @@ impl ComparisonView {
             });
             self.selection = Some((selection, [observe, copy]));
         }
+        let row = self
+            .browsing(cx)
+            .map_or(0, |browsing| browsing.first_visible_line);
+        self.restore_scroll(row);
         self.patch.complete(result);
         cx.notify();
     }
@@ -543,23 +582,60 @@ impl ComparisonView {
                 == Some(file)
     }
 
+    fn browsing<'a>(&self, cx: &'a App) -> Option<&'a Browsing> {
+        self.repository
+            .read(cx)
+            .route(cx)?
+            .review()?
+            .active_review()
+            .map(|review| &review.browsing)
+    }
+
+    fn restore_scroll(&mut self, row: u32) {
+        self.synced_scroll_row = row;
+        // The list applies this after layout, once its row and viewport sizes are known.
+        self.scroll
+            .scroll_to_item_strict(row as usize, ScrollStrategy::Top);
+    }
+
+    fn save_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(mut browsing) = self.browsing(cx).cloned() else {
+            return;
+        };
+        let row = (-self.scroll.0.borrow().base_handle.offset().y / px(DIFF_ROW_HEIGHT))
+            .floor()
+            .max(0.) as u32;
+        if browsing.first_visible_line != row {
+            self.synced_scroll_row = row;
+            browsing.first_visible_line = row;
+            self.set_browsing(browsing, cx);
+        }
+    }
+
     fn select_file(&mut self, file: GitPath, cx: &mut Context<Self>) {
+        let Some(mut browsing) = self.browsing(cx).cloned() else {
+            return;
+        };
+        if browsing.file.as_ref() == Some(&file) {
+            return;
+        }
+        browsing.file = Some(file);
+        browsing.first_visible_line = 0;
+        self.set_browsing(browsing, cx);
+    }
+
+    fn set_browsing(&mut self, browsing: Browsing, cx: &mut Context<Self>) {
         let Some(key) = self.current_key(cx) else {
             return;
         };
         let repository = self.repository.read(cx);
         let tab = repository.tab();
         let result = repository.workspace().update(cx, |workspace, cx| {
-            workspace.edit(
-                |state| {
-                    state.set_browsing(
-                        tab,
-                        &key.branch,
-                        Browsing {
-                            file: Some(file),
-                            ..Default::default()
-                        },
-                    )
+            workspace.navigate(
+                tab,
+                Navigation::SetBrowsing {
+                    branch: key.branch,
+                    browsing,
                 },
                 cx,
             )
@@ -568,7 +644,7 @@ impl ComparisonView {
         cx.notify();
     }
 
-    fn base_picker(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn base_picker(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
         let label = self
             .current_key(cx)
             .and_then(|key| {
@@ -585,26 +661,6 @@ impl ComparisonView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when_some(
-                        window.root::<crate::workspace_window::Kestrel>().flatten(),
-                        |row, root| {
-                            let root = root.read(cx);
-                            row.child(root.navigation_button(
-                                "navigate-back",
-                                "Back",
-                                Command::Back,
-                                theme,
-                                cx,
-                            ))
-                            .child(root.navigation_button(
-                                "navigate-forward",
-                                "Forward",
-                                Command::Forward,
-                                theme,
-                                cx,
-                            ))
-                        },
-                    )
                     .child(div().flex_1())
                     .child(control("choose-base", label, theme).on_click(cx.listener(
                         |this, _, _, cx| {
@@ -703,7 +759,7 @@ impl Render for ComparisonView {
             .when_some(self.error.clone(), |panel, error| {
                 panel.child(div().text_color(theme.error).child(error))
             })
-            .child(self.base_picker(theme, window, cx));
+            .child(self.base_picker(theme, cx));
         panel = match self.review.result() {
             QueryResult::Pending if !self.review.is_fetching() => {
                 panel.child("Choose a comparison base; no unambiguous repository default is known.")
@@ -946,6 +1002,16 @@ impl ComparisonView {
                         })
                         .collect::<Vec<_>>()
                 })
+                .track_scroll(self.scroll.clone())
+                .on_scroll_wheel(cx.listener(|this, _, window, cx| {
+                    let key = this.current_key(cx);
+                    let file = this.patch_key.clone();
+                    cx.defer_in(window, move |this, _, cx| {
+                        if this.current_key(cx) == key && this.patch_key == file {
+                            this.save_scroll(cx);
+                        }
+                    });
+                }))
                 .with_width_from_item(*widest)
                 .with_decoration(gutter)
                 .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)

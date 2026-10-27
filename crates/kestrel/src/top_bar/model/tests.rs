@@ -265,6 +265,7 @@ fn tabs_fill_available_width_then_scroll_at_minimum_width() {
         y: 20.,
         width: 400.,
         scroll: -102.,
+        navigation_width: 0.,
     }));
     let layout = h.model.view().layout;
     close(layout.tab_width, 100.);
@@ -294,6 +295,35 @@ fn resize_and_scroll_during_drag_use_updated_logical_slots() {
     }));
     h.move_to(token, 0, 0.1);
     assert_eq!(h.model.tab_index(1), Some(0));
+}
+
+#[test]
+fn navigation_width_is_excluded_from_tab_layout_and_drag_targets() {
+    let geometry = Geometry {
+        x: 10.,
+        y: 20.,
+        width: 500.,
+        scroll: -80.,
+        navigation_width: 96.,
+    };
+    let layout = Layout::new(geometry, 4);
+    close(layout.pill_width, 228.);
+    close(layout.tab_width, 100.);
+    close(layout.scroll, -80.);
+    let left = geometry.x + SIDE_WIDTH + geometry.navigation_width;
+    assert_eq!(layout.slot_at(left - 20., 40.), None);
+    assert_eq!(layout.slot_at(left + 10., 40.), Some(0));
+    assert_eq!(layout.slot_at(left + 30., 40.), Some(1));
+    assert_eq!(layout.slot_at(left + layout.pill_width, 40.), None);
+    let narrow = Layout::new(
+        Geometry {
+            width: 200.,
+            ..geometry
+        },
+        4,
+    );
+    close(narrow.pill_width, 0.);
+    assert_eq!(narrow.slot_at(left + 10., 40.), None);
 }
 
 #[test]

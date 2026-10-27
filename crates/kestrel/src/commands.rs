@@ -18,6 +18,7 @@ pub enum Command {
     DetachTab,
     Back,
     Forward,
+    RecentlyViewed,
     Minimize,
     MinimizeAll,
     Zoom,
@@ -111,6 +112,7 @@ pub fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Back", Command::Back),
                 MenuItem::action("Forward", Command::Forward),
+                MenuItem::action("Recently Viewed", Command::RecentlyViewed),
             ],
         },
         Menu {
@@ -243,6 +245,7 @@ pub fn menu_state(cx: &mut App) -> Vec<MenuState> {
                         Command::Back | Command::Forward => {
                             root.is_some_and(|root| root.navigation_allowed(*command, cx))
                         }
+                        Command::RecentlyViewed => window,
                         Command::NewWindow => allowed,
                         Command::CloseWindow => window,
                         Command::CloseAllWindows => has_windows && all_allowed,

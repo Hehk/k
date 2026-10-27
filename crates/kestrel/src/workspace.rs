@@ -2,39 +2,46 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task, WeakEntity,
 };
 use kestrel::{
-    state::{AppState, Project, Route, StateError, WindowId},
+    model::{self, Effect, Event, Model, Persistence, SaveBatch, SaveResult},
+    state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
     storage::{self, Store},
+    viewing_history::{Foreground, Record, ViewingHistory, ViewingId, storage as history_storage},
 };
 
 use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
 
-mod history;
-use history::Closed;
-
-const CLOSED_HISTORY_LIMIT: usize = 100;
+pub use kestrel::model::OpenViewIn;
 
 pub struct Session(pub Entity<Workspace>);
 impl Global for Session {}
 
 pub struct LoadedWorkspace {
     state: AppState,
+    viewing_history: ViewingHistory,
     writer: Option<Writer>,
+    history_writer: Option<HistoryWriter>,
     notice: Option<String>,
 }
 
 impl LoadedWorkspace {
     pub fn load(store: Result<Store, storage::Error>) -> Self {
+        let history_path = store
+            .as_ref()
+            .ok()
+            .map(|store| store.path().with_extension("history.jsonl"));
         let result = store.and_then(|mut store| {
             let loaded = store.load()?;
             Ok(Self {
                 state: loaded.state,
+                viewing_history: ViewingHistory::default(),
+                history_writer: None,
                 writer: Some(Writer {
                     store,
                     revision: 0,
@@ -49,13 +56,44 @@ impl LoadedWorkspace {
                 }),
             })
         });
-        result.unwrap_or_else(|error| Self {
+        let mut loaded = result.unwrap_or_else(|error| Self {
             state: AppState::default(),
+            viewing_history: ViewingHistory::default(),
             writer: None,
+            history_writer: None,
             notice: Some(format!(
-                "Saved state could not be loaded: {error}. Saving is disabled; restart to retry."
+                "Saved state could not be loaded: {error}. Workspace saving is disabled; restart to retry."
             )),
-        })
+        });
+        // Workspace first, then reconcile the independently saved log by repository identity.
+        // Either file can be newer or unavailable; neither load requires a cross-file transaction.
+        if let Some(path) = history_path {
+            let legacy = path.with_extension("bin");
+            if !path.exists() && legacy.exists() {
+                loaded.add_notice(format!("Experimental binary history at {} was left untouched. This version starts a new JSON history journal.", legacy.display()));
+            }
+            let mut store = history_storage::Store::new(path);
+            match store.load(&mut loaded.state) {
+                Ok(history) => {
+                    loaded.viewing_history = history.history;
+                    loaded.history_writer = Some(HistoryWriter { store, closed: false });
+                    if let Some(recovery) = history.recovery {
+                        loaded.add_notice(format!("Viewing history was recovered through its last valid entry: {}. Original preserved at {}.", recovery.reason, recovery.backup.display()));
+                    }
+                }
+                Err(error) => loaded.add_notice(format!("Viewing history could not be loaded: {error}. History saving is disabled; restart to retry.")),
+            }
+        }
+        loaded
+    }
+
+    fn add_notice(&mut self, message: String) {
+        if let Some(notice) = &mut self.notice {
+            notice.push('\n');
+            notice.push_str(&message);
+        } else {
+            self.notice = Some(message);
+        }
     }
 }
 
@@ -75,18 +113,31 @@ impl Writer {
     }
 }
 
+struct HistoryWriter {
+    store: history_storage::Store,
+    closed: bool,
+}
+
+impl HistoryWriter {
+    fn save(&mut self, records: &[(u64, Record)]) -> Result<(), history_storage::Error> {
+        if self.closed {
+            return Ok(());
+        }
+        self.store.append(records.iter().map(|(_, record)| record))
+    }
+}
+
 pub struct Workspace {
-    state: AppState,
+    model: Model,
     writer: Option<Arc<Mutex<Writer>>>,
-    revision: u64,
+    history_writer: Option<Arc<Mutex<HistoryWriter>>>,
     save_task: Option<Task<()>>,
-    save_error: Option<String>,
     notice: Option<String>,
-    quitting: bool,
-    closed: Vec<Closed>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
     watching_repositories: bool,
+    // Native focus can be absent while the persisted active window still names the last window.
+    foreground: Option<WindowId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,17 +163,24 @@ impl Workspace {
             });
         });
         Self {
-            state: loaded.state,
+            model: Model::new(
+                loaded.state,
+                loaded.viewing_history,
+                Persistence {
+                    workspace: loaded.writer.is_some(),
+                    history: loaded.history_writer.is_some(),
+                },
+            ),
             writer: loaded.writer.map(|writer| Arc::new(Mutex::new(writer))),
-            revision: 0,
+            history_writer: loaded
+                .history_writer
+                .map(|writer| Arc::new(Mutex::new(writer))),
             save_task: None,
-            save_error: None,
             notice: loaded.notice,
-            quitting: false,
-            closed: Vec::new(),
             native_windows: HashMap::new(),
             repository_snapshots: HashMap::new(),
             watching_repositories: false,
+            foreground: None,
             _subscriptions: vec![quit, closed],
         }
     }
@@ -166,7 +224,20 @@ impl Workspace {
     }
 
     pub fn state(&self) -> &AppState {
-        &self.state
+        self.model.state()
+    }
+
+    pub fn viewing_history(&self) -> &ViewingHistory {
+        self.model.history()
+    }
+
+    pub fn open_view(
+        &mut self,
+        id: ViewingId,
+        target: OpenViewIn,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StateError> {
+        self.dispatch(Event::OpenView { id, target }, cx)
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -174,7 +245,16 @@ impl Workspace {
     }
 
     pub fn save_error(&self) -> Option<&str> {
-        self.save_error.as_deref()
+        self.model.save_error()
+    }
+
+    pub fn navigate(
+        &mut self,
+        tab: TabId,
+        action: Navigation,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StateError> {
+        self.dispatch(Event::Navigate { tab, action }, cx)
     }
 
     pub fn edit<R>(
@@ -182,31 +262,30 @@ impl Workspace {
         change: impl FnOnce(&mut AppState) -> Result<R, StateError>,
         cx: &mut Context<Self>,
     ) -> Result<R, StateError> {
-        if self.quitting {
-            return Err(StateError("application is quitting"));
-        }
-        let mut state = self.state.clone();
-        let result = change(&mut state)?;
-        self.replace(state, cx);
-        Ok(result)
+        let (value, effects) = self.model.edit(self.context(), change)?;
+        self.run_effects(effects, cx);
+        Ok(value)
     }
 
+    /// Commit structural edits to current state, not workspace loading/restoration.
+    /// See [`Event::Replace`] for the history-binding identity constraint.
     pub fn replace(&mut self, state: AppState, cx: &mut Context<Self>) {
-        if self.quitting || self.state == state {
-            return;
-        }
-        self.closed.extend(Closed::removed(&self.state, &state));
-        let excess = self.closed.len().saturating_sub(CLOSED_HISTORY_LIMIT);
-        self.closed.drain(..excess);
-        self.state = state;
-        self.revision += 1;
-        self.save(cx);
-        cx.notify();
+        self.dispatch(Event::Replace(state), cx)
+            .expect("replacement cannot fail");
+    }
+
+    fn dispatch(&mut self, event: Event, cx: &mut Context<Self>) -> Result<(), StateError> {
+        let effects = self.model.transition(event, self.context())?;
+        self.run_effects(effects, cx);
+        Ok(())
     }
 
     pub fn close_window(&mut self, id: WindowId, cx: &mut Context<Self>) {
         self.native_windows.remove(&id);
-        if !self.quitting {
+        if self.foreground == Some(id) {
+            self.foreground = None;
+        }
+        if !self.model.stopped() {
             let _ = self.edit(
                 |state| {
                     state.close_window(id);
@@ -218,31 +297,58 @@ impl Workspace {
     }
 
     pub fn can_reopen(&self) -> bool {
-        !self.quitting && !self.closed.is_empty()
+        self.model.can_reopen()
     }
 
     pub fn reopen_state(
         &self,
         target: Option<WindowId>,
     ) -> Result<Option<(AppState, WindowId)>, StateError> {
-        if self.quitting {
-            return Err(StateError("application is quitting"));
+        self.model.reopen_state(target)
+    }
+
+    pub fn finish_reopen(
+        &mut self,
+        state: AppState,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StateError> {
+        self.dispatch(Event::Reopen(state), cx)
+    }
+
+    fn context(&self) -> model::Context {
+        model::Context {
+            foreground: if self.native_windows.is_empty() {
+                Foreground::SelectedWindow
+            } else {
+                self.foreground
+                    .map_or(Foreground::Hidden, Foreground::Window)
+            },
+            timestamp_ms: match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as i64,
+                Err(error) => -(error.duration().as_millis() as i64),
+            },
         }
-        let Some(closed) = self.closed.last() else {
-            return Ok(None);
-        };
-        let mut state = self.state.clone();
-        let id = closed.restore(&mut state, target)?;
-        Ok(Some((state, id)))
     }
 
-    pub fn finish_reopen(&mut self, state: AppState, cx: &mut Context<Self>) {
-        self.closed.pop();
-        self.replace(state, cx);
-    }
-
-    pub fn register_window(&mut self, id: WindowId, handle: AnyWindowHandle) {
+    pub fn register_window(&mut self, id: WindowId, handle: AnyWindowHandle, active: bool) {
         self.native_windows.insert(id, handle);
+        if active {
+            self.foreground = Some(id);
+        }
+    }
+
+    pub fn window_activation(&mut self, id: WindowId, active: bool, cx: &mut Context<Self>) {
+        if active {
+            let changed = self.foreground != Some(id);
+            self.foreground = Some(id);
+            if (changed || self.state().active_window() != Some(id))
+                && self.state().window(id).is_ok()
+            {
+                let _ = self.dispatch(Event::FocusWindow(id), cx);
+            }
+        } else if self.foreground == Some(id) {
+            self.foreground = None;
+        }
     }
 
     pub fn activate_window(&self, id: WindowId, cx: &mut App) {
@@ -252,7 +358,7 @@ impl Workspace {
     }
 
     pub fn tabs(&self, id: WindowId) -> (Vec<Tab>, Option<u64>) {
-        let Ok(window) = self.state.window(id) else {
+        let Ok(window) = self.state().window(id) else {
             return (Vec::new(), None);
         };
         let tabs = window
@@ -260,57 +366,112 @@ impl Workspace {
             .iter()
             .map(|tab| Tab {
                 id: tab.id.as_u64(),
-                title: tab_title(&self.state, tab),
+                title: tab_title(self.state(), tab),
             })
             .collect();
         (tabs, window.active_tab.map(|id| id.as_u64()))
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let Some(writer) = self.writer.clone() else {
-            return;
-        };
-        let state = self.state.clone();
-        let revision = self.revision;
-        self.save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut writer = writer.lock().map_err(|error| error.to_string())?;
-                    writer
-                        .save(revision, &state)
-                        .map_err(|error| error.to_string())
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.revision == revision && !this.quitting {
-                    this.save_error = result.err();
-                    cx.notify();
+        self.dispatch(Event::SaveRequested, cx)
+            .expect("save request cannot fail");
+    }
+
+    fn run_effects(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                Effect::Changed => cx.notify(),
+                Effect::ScheduleSave(id) => {
+                    self.save_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.dispatch(Event::SaveDue(id), cx));
+                    }));
                 }
-            });
-        }));
+                Effect::Save(batch) => {
+                    let writer = self.writer.clone();
+                    let history_writer = self.history_writer.clone();
+                    self.save_task = Some(cx.spawn(async move |this, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(
+                                async move { write_batch(*batch, writer, history_writer, false) },
+                            )
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.dispatch(Event::Saved(result), cx));
+                    }));
+                }
+                Effect::Flush(_) => unreachable!("quit effects are handled synchronously"),
+            }
+        }
     }
 
     fn flush_on_quit(&mut self) {
-        self.quitting = true;
-        self.save_task.take();
-        if let Some(writer) = &self.writer {
-            // GPUI allows only 100 ms for async quit hooks. Finish this write before teardown.
-            let mut writer = match writer.lock() {
-                Ok(writer) => writer,
-                Err(error) => {
-                    eprintln!("Could not save workspace on quit: {error}");
-                    return;
-                }
+        let effects = self
+            .model
+            .transition(Event::Quit, self.context())
+            .expect("quit cannot fail");
+        for effect in effects {
+            let Effect::Flush(batch) = effect else {
+                unreachable!("quit only emits the final flush");
             };
-            if let Err(error) = writer.save(self.revision, &self.state) {
-                eprintln!("Could not save workspace on quit: {error}");
+            self.save_task.take();
+            // GPUI allows only 100 ms for async quit hooks. The mutexes order this
+            // final write after in-flight IO; closing fences workers not yet started.
+            let result = write_batch(
+                *batch,
+                self.writer.clone(),
+                self.history_writer.clone(),
+                true,
+            );
+            self.model
+                .transition(Event::Saved(result), self.context())
+                .expect("save completion cannot fail");
+            if let Some(error) = self.save_error() {
+                eprintln!("Could not save on quit: {error}");
             }
-            writer.closed = true;
         }
+    }
+}
+
+fn write_batch(
+    batch: SaveBatch,
+    writer: Option<Arc<Mutex<Writer>>>,
+    history_writer: Option<Arc<Mutex<HistoryWriter>>>,
+    closing: bool,
+) -> SaveResult {
+    let workspace = batch.workspace.map(|state| {
+        writer
+            .as_ref()
+            .expect("workspace persistence has a writer")
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|mut writer| {
+                let result = writer
+                    .save(batch.revision, &state)
+                    .map_err(|error| error.to_string());
+                writer.closed |= closing;
+                result
+            })
+    });
+    // Independent files: always attempt history even if the workspace write failed.
+    let history = batch.history.map(|records| {
+        history_writer
+            .as_ref()
+            .expect("history persistence has a writer")
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|mut writer| {
+                let result = writer.save(&records).map_err(|error| error.to_string());
+                writer.closed |= closing;
+                result
+            })
+    });
+    SaveResult {
+        id: batch.id,
+        workspace,
+        history,
     }
 }
 
@@ -353,47 +514,7 @@ pub fn set_tab_layout(
     tabs: &[u64],
     active: Option<u64>,
 ) -> Result<(), StateError> {
-    let previous = state
-        .window(id)?
-        .tabs
-        .iter()
-        .map(|tab| tab.id)
-        .collect::<Vec<_>>();
-    let tabs = tabs
-        .iter()
-        .map(|id| {
-            previous
-                .iter()
-                .find(|tab| tab.as_u64() == *id)
-                .copied()
-                .ok_or(StateError("tab is not in this window"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if tabs
-        .iter()
-        .enumerate()
-        .any(|(index, id)| tabs[..index].contains(id))
-    {
-        return Err(StateError("duplicate tab"));
-    }
-    let selected = active.and_then(|id| tabs.iter().find(|tab| tab.as_u64() == id).copied());
-    if (tabs.is_empty() && active.is_some()) || (!tabs.is_empty() && selected.is_none()) {
-        return Err(StateError("invalid active tab"));
-    }
-    for tab in previous {
-        if !tabs.contains(&tab) {
-            state.close_tab(tab);
-        }
-    }
-    for (index, tab) in tabs.iter().enumerate() {
-        if state.window(id)?.tabs[index].id != *tab {
-            state.move_tab(*tab, id, index)?;
-        }
-    }
-    if let Some(tab) = selected {
-        state.select_tab(tab)?;
-    }
-    Ok(())
+    state.set_tab_layout(id, tabs, active)
 }
 
 #[cfg(test)]

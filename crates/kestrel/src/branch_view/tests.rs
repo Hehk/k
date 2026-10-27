@@ -117,7 +117,8 @@ fn branch_sorting_is_deterministic_and_search_keeps_distinct_refs() {
             &snapshot,
             &BranchList {
                 query: "TOPIC".into(),
-                sort: BranchSort::Name
+                sort: BranchSort::Name,
+                ..Default::default()
             }
         ),
         [2, 1]
@@ -127,7 +128,8 @@ fn branch_sorting_is_deterministic_and_search_keeps_distinct_refs() {
             &snapshot,
             &BranchList {
                 query: String::new(),
-                sort: BranchSort::Name
+                sort: BranchSort::Name,
+                ..Default::default()
             }
         ),
         [3, 2, 1, 0]

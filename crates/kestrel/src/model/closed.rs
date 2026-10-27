@@ -1,4 +1,4 @@
-use kestrel::state::{AppState, StateError, Tab, WindowId};
+use crate::state::{AppState, StateError, Tab, WindowId};
 
 #[cfg(test)]
 mod tests;

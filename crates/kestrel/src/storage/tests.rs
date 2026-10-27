@@ -62,6 +62,63 @@ fn first_launch_and_successive_atomic_saves_round_trip() {
 }
 
 #[test]
+#[cfg(unix)]
+fn version_two_fixture_migrates_pins_views_and_both_trails_before_saving_version_three() {
+    use crate::state::{BranchSort, Destination, ReadingMode};
+
+    let bytes = include_bytes!("fixtures/v2_navigation.json");
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("state.json");
+    fs::write(&path, bytes).unwrap();
+    let mut store = Store::new(path.clone());
+    let loaded = store.load().unwrap();
+    assert!(loaded.recovery.is_none());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut state = loaded.state;
+    let tab = state.windows()[0].active_tab.unwrap();
+    assert!(state.tab(tab).unwrap().can_go_back());
+    assert!(state.tab(tab).unwrap().can_go_forward());
+    state.go_back(tab).unwrap();
+    let visit = state.tab(tab).unwrap().snapshot().unwrap();
+    let Destination::Comparison {
+        comparison: Some(comparison),
+        ..
+    } = visit.snapshot.destination
+    else {
+        panic!()
+    };
+    assert_eq!(
+        comparison.commits.new.to_string(),
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(visit.snapshot.view.browsing.file, Some("file.rs".into()));
+    assert_eq!(visit.snapshot.view.browsing.mode, ReadingMode::HeadFile);
+    assert_eq!(visit.snapshot.view.browsing.first_visible_line, 73);
+    state.go_forward(tab).unwrap();
+    state.go_forward(tab).unwrap();
+    let list = state
+        .tab(tab)
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .snapshot
+        .view
+        .branches;
+    assert_eq!(list.query, "topic");
+    assert_eq!(list.sort, BranchSort::Name);
+    assert_eq!(list.first_visible_row, 0);
+    store.save(&state).unwrap();
+    let encoded: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(encoded["version"], 3);
+    assert!(
+        encoded["state"]["windows"][0]["tabs"][0]["back"][0]
+            .get("snapshot")
+            .is_some()
+    );
+    assert_eq!(Store::new(path).load().unwrap().state, state);
+}
+
+#[test]
 fn corrupt_or_unsupported_state_is_preserved_before_replacement() {
     for bytes in [
         b"{broken".as_slice(),

@@ -15,6 +15,11 @@ pub struct RepositoryView {
 }
 
 impl RepositoryView {
+    #[cfg(test)]
+    pub fn comparison_freshness(&self, cx: &gpui::App) -> Option<bool> {
+        self.comparison.read(cx).freshness()
+    }
+
     pub fn new(
         workspace: Entity<Workspace>,
         window: WindowId,

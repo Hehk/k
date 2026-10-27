@@ -2,8 +2,8 @@
 // Follow-up: kestrel/UI/branch_list_improvements__plan.md in Obsidian.
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Subscription, Window, deferred, div, prelude::*,
-    px, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ScrollStrategy, Subscription,
+    UniformListScrollHandle, Window, deferred, div, prelude::*, px, uniform_list,
 };
 use kestrel::{
     git::Snapshot,
@@ -23,6 +23,7 @@ pub struct BranchView {
     focus: FocusHandle,
     search: Entity<TextInput>,
     filters: BranchList,
+    scroll: UniformListScrollHandle,
     visible: Vec<usize>,
     sort_open: bool,
     error: Option<String>,
@@ -88,6 +89,7 @@ impl BranchView {
             focus: cx.focus_handle(),
             search,
             filters: BranchList::default(),
+            scroll: UniformListScrollHandle::new(),
             visible: Vec::new(),
             sort_open: false,
             error: None,
@@ -107,6 +109,10 @@ impl BranchView {
             self.search
                 .update(cx, |search, cx| search.set_text(&branches.query, cx));
             if self.filters != branches {
+                self.scroll.scroll_to_item_strict(
+                    branches.first_visible_row as usize,
+                    ScrollStrategy::Top,
+                );
                 self.filters = branches;
                 self.filter(cx);
             }
@@ -121,7 +127,20 @@ impl BranchView {
         };
     }
 
-    fn change_filters(&mut self, filters: BranchList, cx: &mut Context<Self>) {
+    fn save_scroll(&mut self, cx: &mut Context<Self>) {
+        let row = (-self.scroll.0.borrow().base_handle.offset().y / px(38.))
+            .floor()
+            .max(0.) as u32;
+        if self.filters.first_visible_row != row {
+            self.filters.first_visible_row = row;
+            self.change_filters(self.filters.clone(), cx);
+        }
+    }
+
+    fn change_filters(&mut self, mut filters: BranchList, cx: &mut Context<Self>) {
+        if filters.query != self.filters.query || filters.sort != self.filters.sort {
+            filters.first_visible_row = 0;
+        }
         let repository = self.repository.read(cx);
         if !matches!(
             repository.route(cx),
@@ -292,6 +311,31 @@ impl Render for BranchView {
                         .collect()
                 }),
             )
+            .track_scroll(self.scroll.clone())
+            .on_scroll_wheel(cx.listener(|this, _, window, cx| {
+                let repository = this.repository.read(cx);
+                let activation = repository
+                    .workspace()
+                    .read(cx)
+                    .state()
+                    .tab(repository.tab())
+                    .ok()
+                    .map(|tab| tab.activation());
+                // Capture after the list handles the wheel, but never write into a later visit.
+                cx.defer_in(window, move |this, _, cx| {
+                    let repository = this.repository.read(cx);
+                    let current = repository
+                        .workspace()
+                        .read(cx)
+                        .state()
+                        .tab(repository.tab())
+                        .ok()
+                        .map(|tab| tab.activation());
+                    if current == activation {
+                        this.save_scroll(cx);
+                    }
+                });
+            }))
             .flex_1()
             .min_h_0()
             .into_any_element(),

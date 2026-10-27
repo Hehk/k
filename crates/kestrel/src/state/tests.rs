@@ -77,8 +77,17 @@ fn unchanged_restored_reviews_do_not_replace_the_remembered_context() {
     );
     let mut latest = pinned.clone();
     latest.commits.new = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse().unwrap();
+    restored.select_branch(a, pinned.branch.clone()).unwrap();
     restored
-        .set_comparison(a, BaseSelection::Default, latest.clone())
+        .navigate(
+            a,
+            Navigation::ComparisonLoaded {
+                activation: restored.tab(a).unwrap().activation(),
+                change: ComparisonChange::LoadLatest,
+                base: BaseSelection::Default,
+                comparison: latest.clone(),
+            },
+        )
         .unwrap();
     assert_eq!(
         restored.project(project).unwrap().last_review.reviews[0].comparison,
@@ -223,6 +232,7 @@ fn branch_lists_restore_filters_and_remember_pins_without_changing_other_tabs() 
     let filters = BranchList {
         query: "topic".into(),
         sort: BranchSort::Name,
+        first_visible_row: 12,
     };
     state.set_branch_list(tab, filters.clone()).unwrap();
     state.select_branch(tab, "refs/heads/topic".into()).unwrap();

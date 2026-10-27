@@ -7,6 +7,7 @@ mod controls;
 mod debug_panel;
 mod diff_selection;
 mod native;
+mod recent_views;
 mod repository_model;
 mod repository_view;
 mod text_input;

@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "state": {
+    "projects": [{
+      "id": 1,
+      "directory": { "Unix": [47, 114, 101, 112, 111] },
+      "common_dir": { "Unix": [47, 114, 101, 112, 111, 47, 46, 103, 105, 116] },
+      "selected_branch": null,
+      "reviews": []
+    }],
+    "windows": [{
+      "id": 2,
+      "active_tab": 3,
+      "tabs": [{
+        "id": 3,
+        "route": "Home",
+        "back": [{ "Repository": {
+          "project": 1,
+          "page": "Comparison",
+          "branches": { "query": "topic", "sort": "Name" },
+          "review": {
+            "selected_branch": [114, 101, 102, 115, 47, 104, 101, 97, 100, 115, 47, 116, 111, 112, 105, 99],
+            "reviews": [{
+              "branch": [114, 101, 102, 115, 47, 104, 101, 97, 100, 115, 47, 116, 111, 112, 105, 99],
+              "base": "Default",
+              "comparison": {
+                "branch": [114, 101, 102, 115, 47, 104, 101, 97, 100, 115, 47, 116, 111, 112, 105, 99],
+                "base": [114, 101, 102, 115, 47, 104, 101, 97, 100, 115, 47, 109, 97, 105, 110],
+                "base_tip": "1111111111111111111111111111111111111111",
+                "commits": {
+                  "old": "1111111111111111111111111111111111111111",
+                  "new": "2222222222222222222222222222222222222222"
+                }
+              },
+              "browsing": {
+                "file": [102, 105, 108, 101, 46, 114, 115],
+                "directory": null,
+                "mode": "HeadFile",
+                "first_visible_line": 73
+              }
+            }]
+          }
+        }}],
+        "forward": [{ "Repository": {
+          "project": 1,
+          "page": "Branches",
+          "branches": { "query": "topic", "sort": "Name" },
+          "review": { "selected_branch": null, "reviews": [] }
+        }}]
+      }]
+    }],
+    "active_window": 2,
+    "next_id": 4
+  }
+}
