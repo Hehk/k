@@ -226,6 +226,162 @@ fn a_saved_view_opens_in_the_requested_tab_or_a_new_tab_after_its_source_is_clos
 }
 
 #[gpui::test]
+fn independent_tab_trails_survive_move_close_reopen_and_restart(cx: &mut TestAppContext) {
+    let (dir, workspace, window, first) = setup(cx);
+    workspace.update(cx, |workspace, cx| {
+        let second = workspace
+            .edit(
+                |state| {
+                    let project = state.tab(first)?.route.project().unwrap();
+                    let old = "1111111111111111111111111111111111111111".parse().unwrap();
+                    let comparison = Comparison {
+                        branch: "refs/heads/review".into(),
+                        base: "refs/heads/main".into(),
+                        base_tip: old,
+                        commits: Endpoints {
+                            old,
+                            new: "2222222222222222222222222222222222222222".parse().unwrap(),
+                        },
+                    };
+                    state.select_branch(first, comparison.branch.clone())?;
+                    state.set_comparison(first, BaseSelection::Default, comparison)?;
+                    state.set_browsing(
+                        first,
+                        &"refs/heads/review".into(),
+                        Browsing {
+                            file: Some("first.rs".into()),
+                            first_visible_line: 20,
+                            ..Default::default()
+                        },
+                    )?;
+                    let second = state.new_tab(window)?;
+                    state.open_project(project, second)?;
+                    state.select_branch(second, "refs/heads/review".into())?;
+                    state.set_browsing(
+                        second,
+                        &"refs/heads/review".into(),
+                        Browsing {
+                            file: Some("second.rs".into()),
+                            first_visible_line: 40,
+                            ..Default::default()
+                        },
+                    )?;
+                    state.go_back(second)?;
+                    Ok(second)
+                },
+                cx,
+            )
+            .unwrap();
+        let a = workspace.state().tab(first).unwrap().clone();
+        let b = workspace.state().tab(second).unwrap().clone();
+        assert!(b.can_go_forward());
+        let records = workspace.viewing_history().records().to_vec();
+        for tab in [first, second] {
+            workspace.navigate(tab, Navigation::SelectTab, cx).unwrap();
+        }
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 2
+        );
+        assert_eq!(workspace.state().tab(first).unwrap(), &a);
+        assert_eq!(workspace.state().tab(second).unwrap(), &b);
+
+        let mut detached = workspace.state().clone();
+        let target = detached.new_window().unwrap();
+        detached.move_tab(second, target, 0).unwrap();
+        workspace.replace(detached, cx);
+        assert_eq!(workspace.state().tab(first).unwrap(), &a);
+        assert_eq!(workspace.state().tab(second).unwrap(), &b);
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 2
+        );
+        workspace.close_window(target, cx);
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 2
+        );
+        let (restored, target) = workspace.reopen_state(None).unwrap().unwrap();
+        workspace.finish_reopen(restored, cx).unwrap();
+        let reopened = workspace
+            .state()
+            .window(target)
+            .unwrap()
+            .active_tab
+            .unwrap();
+        assert_eq!(
+            workspace.state().tab(reopened).unwrap().snapshot().unwrap(),
+            b.snapshot().unwrap()
+        );
+        assert!(workspace.state().tab(reopened).unwrap().can_go_forward());
+        assert_eq!(workspace.state().tab(first).unwrap(), &a);
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 3
+        );
+        workspace
+            .navigate(reopened, Navigation::Forward, cx)
+            .unwrap();
+        let snapshot = workspace
+            .state()
+            .tab(reopened)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            snapshot.destination,
+            a.snapshot().unwrap().snapshot.destination
+        );
+        assert_eq!(snapshot.view.browsing.file, Some("second.rs".into()));
+        assert_eq!(snapshot.view.browsing.first_visible_line, 40);
+        assert_eq!(
+            &workspace.viewing_history().records()[..records.len()],
+            records
+        );
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 4
+        );
+        workspace.flush_on_quit();
+        assert!(workspace.save_error().is_none());
+    });
+    let (state, records) = workspace.read_with(cx, |workspace, _| {
+        (
+            workspace.state().clone(),
+            workspace.viewing_history().records().to_vec(),
+        )
+    });
+    let reloaded = cx.new(|cx| {
+        Workspace::new(
+            LoadedWorkspace::load(Ok(Store::new(dir.path().join("state.json")))),
+            cx,
+        )
+    });
+    reloaded.update(cx, |workspace, cx| {
+        assert_eq!(workspace.state(), &state);
+        assert_eq!(workspace.viewing_history().records(), records);
+        workspace.window_activation(state.active_window().unwrap(), true, cx);
+        workspace
+            .navigate(first, Navigation::SelectTab, cx)
+            .unwrap();
+        assert_eq!(workspace.viewing_history().records(), records);
+        workspace.edit(|state| state.new_tab(window), cx).unwrap();
+        workspace
+            .navigate(first, Navigation::SelectTab, cx)
+            .unwrap();
+        assert_eq!(
+            workspace.viewing_history().records().len(),
+            records.len() + 1
+        );
+        assert_eq!(
+            workspace.state().tab(first).unwrap(),
+            state.tab(first).unwrap()
+        );
+    });
+}
+
+#[gpui::test]
 fn tab_bar_selection_records_but_reordering_and_automatic_close_selection_do_not(
     cx: &mut TestAppContext,
 ) {

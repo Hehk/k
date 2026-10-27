@@ -1,6 +1,8 @@
 use super::*;
 use kestrel::state::{BranchSort, RepositoryPage};
 
+mod acceptance;
+
 struct Fixture {
     dir: tempfile::TempDir,
     git: git2::Repository,
