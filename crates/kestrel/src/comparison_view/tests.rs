@@ -8,6 +8,7 @@ use kestrel::{
     storage::Store,
 };
 
+mod retry;
 mod structural;
 
 #[test]

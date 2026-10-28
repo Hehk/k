@@ -53,7 +53,7 @@ pub struct ComparisonView {
     review: Query<ReviewData>,
     review_task: Option<Task<()>>,
     review_revision: u64,
-    review_change: ComparisonChange,
+    review_request: Option<ReviewRequest>,
     patch_key: Option<FileChange>,
     patch: Query<LoadedPatch>,
     patch_task: Option<PendingPatch>,
@@ -78,6 +78,27 @@ struct ReviewKey {
     branch: RefName,
     base: BaseSelection,
     comparison: Option<Comparison>,
+}
+
+#[derive(Clone)]
+struct ReviewRequest {
+    key: ReviewKey,
+    base: BaseSelection,
+    reference: Option<RefName>,
+    change: ComparisonChange,
+}
+
+impl ReviewRequest {
+    fn retry_label(&self) -> &'static str {
+        if self.key.comparison.is_none() {
+            return "Retry comparison";
+        }
+        match self.change {
+            ComparisonChange::Resolve => "Retry pinned comparison",
+            ComparisonChange::ChangeBase => "Retry base change",
+            ComparisonChange::LoadLatest => "Retry load latest",
+        }
+    }
 }
 
 struct ReviewData {
@@ -264,7 +285,7 @@ impl ComparisonView {
             review: Query::new(),
             review_task: None,
             review_revision: 0,
-            review_change: ComparisonChange::Resolve,
+            review_request: None,
             patch_key: None,
             patch: Query::new(),
             patch_task: None,
@@ -291,6 +312,7 @@ impl ComparisonView {
             self.selection = None;
             self.patch_key = None;
             self.review_key = key;
+            self.review_request = None;
             self.base_open = false;
             self.review = Query::new();
             if self.review_key.is_some() {
@@ -369,14 +391,36 @@ impl ComparisonView {
             cx.notify();
             return;
         }
-        self.review_revision += 1;
-        self.review_change = if latest {
+        let change = if latest {
             ComparisonChange::LoadLatest
         } else if override_base.is_some() {
             ComparisonChange::ChangeBase
         } else {
             ComparisonChange::Resolve
         };
+        self.start_review(
+            ReviewRequest {
+                key,
+                base,
+                reference,
+                change,
+            },
+            cx,
+        );
+    }
+
+    fn retry_review(&mut self, cx: &mut Context<Self>) {
+        if let Some(request) = self.review_request.clone()
+            && self.current_key(cx).as_ref() == Some(&request.key)
+        {
+            self.start_review(request, cx);
+        }
+    }
+
+    fn start_review(&mut self, request: ReviewRequest, cx: &mut Context<Self>) {
+        // Request intent is transient; only a successful completion may commit pins or history.
+        self.review_request = Some(request.clone());
+        self.review_revision += 1;
         let revision = self.review_revision;
         self.patch_revision += 1;
         self.patch_task.take();
@@ -386,18 +430,27 @@ impl ComparisonView {
         self.review = Query::new();
         self.review.start();
         let project = self.repository.read(cx).project().clone();
-        let request = key.clone();
+        let ReviewRequest {
+            key,
+            base,
+            reference,
+            change,
+        } = request;
+        let comparison_key = key.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let repository = open(&project)?;
-                    let comparison = match (&request.comparison, override_base) {
-                        (Some(comparison), _) if latest => repository.load_latest(comparison),
-                        (Some(comparison), Some(base)) => repository.change_base(comparison, &base),
-                        (Some(comparison), None) => Ok(comparison.clone()),
+                    let comparison = match (&comparison_key.comparison, change) {
+                        (Some(comparison), ComparisonChange::LoadLatest) => {
+                            repository.load_latest(comparison)
+                        }
+                        (Some(comparison), ComparisonChange::ChangeBase) => repository
+                            .change_base(comparison, &reference.expect("base changes have a base")),
+                        (Some(comparison), ComparisonChange::Resolve) => Ok(comparison.clone()),
                         (None, _) => repository.compare(
-                            &request.branch,
+                            &comparison_key.branch,
                             &reference.expect("new comparisons have a base"),
                         ),
                     }
@@ -444,7 +497,7 @@ impl ComparisonView {
                         tab,
                         Navigation::ComparisonLoaded {
                             activation: key.activation,
-                            change: self.review_change,
+                            change: self.review_request.as_ref().expect("active request").change,
                             base: base.clone(),
                             comparison: comparison.clone(),
                         },
@@ -455,6 +508,7 @@ impl ComparisonView {
                     self.review.complete(Err(error.to_string()));
                 } else {
                     self.review_key = self.current_key(cx);
+                    self.review_request = None;
                     self.review.complete(Ok(data));
                     self.load_patch(cx);
                 }
@@ -768,8 +822,14 @@ impl Render for ComparisonView {
             QueryResult::Error { error, .. } => panel
                 .child(div().text_color(theme.error).child(error.clone()))
                 .child(
-                    control("retry-review", "Retry pinned comparison", theme)
-                        .on_click(cx.listener(|this, _, _, cx| this.load_review(None, false, cx))),
+                    control(
+                        "retry-review",
+                        self.review_request
+                            .as_ref()
+                            .map_or("Retry comparison", ReviewRequest::retry_label),
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_review(cx))),
                 ),
             QueryResult::Success(data) => {
                 let label = format!(
