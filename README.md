@@ -1,5 +1,17 @@
 # Kestrel
 
+## Platform support
+
+The supported development baseline is **native Apple Silicon macOS 26.7.1
+(25G241), on local, internal, case-insensitive APFS**. This is a tested
+configuration, not a minimum macOS version or a release-readiness claim.
+Intel macOS, Rosetta, Linux, Windows, other macOS versions and other filesystems
+are unverified. The Nix flake provides only `aarch64-darwin`; a development shell
+is not an application port.
+
+See [the platform contract and verification matrix](docs/platforms.md) for
+headless checks, native acceptance limits and how to qualify another platform.
+
 ## Development
 
 On macOS, install Xcode and its command-line tools. GPUI compiles Metal shaders, so the separate Metal toolchain component must also be installed if Xcode has not installed it already:
@@ -18,9 +30,10 @@ cargo run -p kestrel
 The flake selects the installed Xcode Metal toolchain for GPUI's `xcrun` shader build. Useful checks:
 
 ```sh
-cargo test --workspace
+python3 scripts/check_platform.py
+cargo test --locked --workspace --all-features
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
 ### Native navigation smoke
