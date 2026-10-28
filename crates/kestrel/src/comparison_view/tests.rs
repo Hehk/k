@@ -85,6 +85,29 @@ fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
 }
 
 #[test]
+fn changed_file_labels_escape_controls_without_changing_git_paths() {
+    let entry = |path: &str| FileEntry {
+        path: path.into(),
+        id: "1111111111111111111111111111111111111111".parse().unwrap(),
+        mode: 0o100644,
+    };
+    let change = FileChange::Renamed {
+        old: entry("old\nparent/old\tname.rs"),
+        new: entry("new\rparent/new\u{85}name.rs"),
+    };
+    let before = change.clone();
+    let label = FileLabel::new(&change);
+    assert_eq!(label.name, r"new\u{85}name.rs");
+    assert_eq!(label.directory.as_deref(), Some(r"new\rparent"));
+    assert_eq!(
+        label.tooltip,
+        r"old\nparent/old\tname.rs → new\rparent/new\u{85}name.rs"
+    );
+    assert_eq!(change, before);
+    assert_eq!(path(&change).0, b"new\rparent/new\xc2\x85name.rs");
+}
+
+#[test]
 fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
     let header = "@".repeat(200);
     let patch = FilePatch::Hunks(vec![

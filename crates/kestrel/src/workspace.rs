@@ -13,7 +13,7 @@ use kestrel::{
     viewing_history::{Foreground, Record, ViewingHistory, ViewingId, storage as history_storage},
 };
 
-use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
+use crate::{controls::single_line, repository_model::RepositorySnapshot, top_bar::model::Tab};
 
 pub use kestrel::model::OpenViewIn;
 
@@ -523,12 +523,13 @@ fn write_batch(
 }
 
 pub fn project_title(project: &Project) -> String {
-    project
-        .directory
-        .file_name()
-        .unwrap_or(project.directory.as_os_str())
-        .to_string_lossy()
-        .into_owned()
+    single_line(
+        &project
+            .directory
+            .file_name()
+            .unwrap_or(project.directory.as_os_str())
+            .to_string_lossy(),
+    )
 }
 
 pub fn tab_title(state: &AppState, tab: &kestrel::state::Tab) -> String {
@@ -547,7 +548,7 @@ pub fn tab_title(state: &AppState, tab: &kestrel::state::Tab) -> String {
             );
             match (page, &review.selected_branch) {
                 (kestrel::state::RepositoryPage::Comparison, Some(branch)) => {
-                    format!("{name} - {}", branch.label())
+                    format!("{name} - {}", single_line(&branch.label()))
                 }
                 _ => name,
             }

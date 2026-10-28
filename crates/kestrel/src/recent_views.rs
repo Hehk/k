@@ -7,7 +7,12 @@ use kestrel::{
     viewing_history::{RECENT_LIMIT, Record, ViewingId},
 };
 
-use crate::{appearance::Theme, controls::tooltip, top_bar::TITLEBAR_HEIGHT, workspace::Workspace};
+use crate::{
+    appearance::Theme,
+    controls::{single_line, tooltip},
+    top_bar::TITLEBAR_HEIGHT,
+    workspace::Workspace,
+};
 
 #[cfg(test)]
 mod tests;
@@ -54,12 +59,16 @@ impl Entry {
                 comparison,
                 ..
             } => {
-                let title = format!("{} - {}", labels.repository, branch.label());
+                let title = format!(
+                    "{} - {}",
+                    single_line(&labels.repository),
+                    single_line(&branch.label())
+                );
                 let identity = if let Some(comparison) = comparison {
                     format!(
                         "{}\nBase: {}\nHead: {}\nBase tip: {}\nMerge base: {}",
-                        String::from_utf8_lossy(&branch.0),
-                        String::from_utf8_lossy(&comparison.base.0),
+                        single_line(&String::from_utf8_lossy(&branch.0)),
+                        single_line(&String::from_utf8_lossy(&comparison.base.0)),
                         comparison.commits.new,
                         comparison.base_tip,
                         comparison.commits.old
@@ -68,26 +77,26 @@ impl Entry {
                     let base = match base {
                         BaseSelection::Default => "Default".into(),
                         BaseSelection::Explicit(base) => {
-                            String::from_utf8_lossy(&base.0).into_owned()
+                            single_line(&String::from_utf8_lossy(&base.0))
                         }
                     };
                     format!(
                         "{}\nBase: {base}\nNot yet resolved",
-                        String::from_utf8_lossy(&branch.0)
+                        single_line(&String::from_utf8_lossy(&branch.0))
                     )
                 };
                 (title, identity)
             }
-            Destination::Branches(_) => (labels.repository.clone(), "Branch list".into()),
+            Destination::Branches(_) => (single_line(&labels.repository), "Branch list".into()),
             Destination::Home => unreachable!("utility pages are excluded from recents"),
         };
         let tooltip = format!(
             "{title}\n{}\n{identity}{}\n\nClick or Return to open\n⌘-click or ⌘Return to open in a new tab",
-            labels.directory,
+            single_line(&labels.directory),
             labels
                 .file
                 .as_ref()
-                .map(|file| format!("\nFile: {file}"))
+                .map(|file| format!("\nFile: {}", single_line(file)))
                 .unwrap_or_default()
         );
         Self {

@@ -8,6 +8,7 @@ use kestrel::{
 use super::*;
 
 mod branches;
+mod labels;
 mod recent;
 use crate::workspace::LoadedWorkspace;
 
