@@ -1,7 +1,7 @@
 use super::*;
 use gpui::{Modifiers, VisualTestContext};
 
-fn redraw(cx: &mut VisualTestContext) {
+pub(super) fn redraw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear());
 }
@@ -13,7 +13,7 @@ fn copy_all(cx: &mut VisualTestContext, expected: &str) {
     cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected));
 }
 
-fn commit(
+pub(super) fn commit(
     git: &git2::Repository,
     reference: &str,
     parent: Option<git2::Oid>,

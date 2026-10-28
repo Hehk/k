@@ -11,6 +11,7 @@ use kestrel::{
 mod freshness;
 mod retry;
 mod structural;
+mod width;
 
 #[test]
 fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
@@ -86,8 +87,8 @@ fn changed_file_labels_prioritize_names_without_losing_path_or_status() {
     assert_eq!(path(&change), &raw_path);
 }
 
-#[test]
-fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
+#[gpui::test]
+fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace(cx: &mut TestAppContext) {
     let header = "@".repeat(200);
     let patch = FilePatch::Hunks(vec![
         Hunk {
@@ -119,7 +120,11 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
             }],
         },
     ]);
-    let PreparedPatch::Rows { rows, widest, text } = PreparedPatch::new(patch) else {
+    let patch = PreparedPatch::new(patch);
+    cx.add_empty_window().update(|window, _| {
+        assert_eq!(patch.widest_row(window), Some(7));
+    });
+    let PreparedPatch::Rows { rows, text, .. } = patch else {
         panic!()
     };
     let actual = rows
@@ -162,7 +167,6 @@ fn prepared_rows_preserve_hunks_line_numbers_markers_and_whitespace() {
             ("", "100", "tail", DiffTone::Added),
         ]
     );
-    assert_eq!(widest, Some(7));
     assert_eq!(
         rows.iter().map(|row| row.marker).collect::<Vec<_>>(),
         vec!["", " ", "-", "+", "", "", "", "", "+"]
@@ -184,7 +188,7 @@ fn preparing_a_patch_preserves_empty_and_unavailable_previews() {
     };
     assert!(rows.is_empty());
     assert!(text.is_empty());
-    assert_eq!(widest, None);
+    assert!(widest.get().is_none());
     for reason in [
         PreviewUnavailable::Binary,
         PreviewUnavailable::Encoding,
@@ -239,24 +243,30 @@ fn prepared_copy_text_preserves_source_markers_blank_lines_and_final_newlines() 
     assert_eq!(text.as_ref(), "old\nnew");
 }
 
-#[test]
-fn prepared_width_keeps_the_last_longest_row() {
-    let PreparedPatch::Rows { widest, .. } = PreparedPatch::new(FilePatch::Hunks(vec![Hunk {
+#[gpui::test]
+fn prepared_width_keeps_the_last_visually_longest_row(cx: &mut TestAppContext) {
+    let patch = PreparedPatch::new(FilePatch::Hunks(vec![Hunk {
         header: "@".into(),
         lines: vec![
             DiffLine::Added {
                 new_line: 1,
-                text: "é\n".into(),
+                text: "cd\n".into(),
             },
             DiffLine::Added {
                 new_line: 2,
                 text: "ab\n".into(),
             },
         ],
-    }])) else {
+    }]));
+    let PreparedPatch::Rows { widest, .. } = &patch else {
         panic!()
     };
-    assert_eq!(widest, Some(2));
+    assert!(widest.get().is_none());
+    cx.add_empty_window().update(|window, _| {
+        assert_eq!(patch.widest_row(window), Some(2));
+        assert_eq!(widest.get(), Some(&Some(2)));
+        assert_eq!(patch.widest_row(window), Some(2));
+    });
 }
 
 fn setup(

@@ -1,7 +1,7 @@
 // TODO: Thoroughly review and improve the comparison page; deferred and non-blocking.
 // Follow-up: kestrel/UI/comparison_view_improvements__plan.md in Obsidian.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use diff::{Cancellation, Engine};
 use gpui::{
@@ -25,6 +25,7 @@ mod gutter;
 mod patch;
 use patch::LoadedPatch;
 
+const DIFF_FONT_SIZE: f32 = 13.;
 const DIFF_NUMBER_WIDTH: f32 = 48.;
 const DIFF_MARKER_WIDTH: f32 = 12.;
 const DIFF_GUTTER_WIDTH: f32 = 2. * DIFF_NUMBER_WIDTH + DIFF_MARKER_WIDTH;
@@ -122,7 +123,7 @@ enum PreparedPatch {
     Unavailable(PreviewUnavailable),
     Rows {
         rows: Arc<[DiffRow]>,
-        widest: Option<usize>,
+        widest: OnceLock<Option<usize>>,
         text: gpui::SharedString,
     },
 }
@@ -208,16 +209,42 @@ impl PreparedPatch {
         if !terminated {
             plain.pop();
         }
-        let widest = rows
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, row)| row.text.len())
-            .map(|(index, _)| index);
         Self::Rows {
             rows: rows.into(),
-            widest,
+            widest: OnceLock::new(),
             text: plain.into(),
         }
+    }
+
+    fn widest_row(&self, window: &Window) -> Option<usize> {
+        let Self::Rows { rows, widest, .. } = self else {
+            return None;
+        };
+        // Row preparation stays off-thread. GPUI's window text system measures
+        // the bounded preview once on first display, including fallback fonts
+        // and tabs. Keep only the index, not a document-sized glyph cache;
+        // subsequent frames shape just the width source and visible rows.
+        *widest.get_or_init(|| {
+            rows.iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let run = gpui::TextRun {
+                        len: row.text.len(),
+                        font: gpui::font(DIFF_FONT),
+                        color: gpui::black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let width = window
+                        .text_system()
+                        .shape_line(row.text.clone(), px(DIFF_FONT_SIZE), &[run], None)
+                        .width;
+                    (index, width)
+                })
+                .max_by(|(_, a), (_, b)| f32::from(*a).total_cmp(&f32::from(*b)))
+                .map(|(index, _)| index)
+        })
     }
 }
 
@@ -904,7 +931,7 @@ impl Render for ComparisonView {
                                         .flex_1()
                                         .min_w_0()
                                         .h_full()
-                                        .child(self.file_preview(theme, cx)),
+                                        .child(self.file_preview(theme, window, cx)),
                                 ),
                         )
                     })
@@ -974,7 +1001,12 @@ impl ComparisonView {
             .on_click(cx.listener(move |this, _, _, cx| this.select_file(file.clone(), cx)))
     }
 
-    fn file_preview(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn file_preview(
+        &self,
+        theme: Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -1003,10 +1035,10 @@ impl ComparisonView {
                         panel.child(div().text_sm().child(format!("Mode: {old} → {new}")))
                     })
             })
-            .child(div().flex_1().min_h_0().child(self.diff(theme, cx)))
+            .child(div().flex_1().min_h_0().child(self.diff(theme, window, cx)))
     }
 
-    fn diff(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn diff(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.patch.result() {
             QueryResult::Pending => div()
                 .child(if self.patch.is_loading() {
@@ -1048,9 +1080,10 @@ impl ComparisonView {
                 .child("No text changes (metadata or mode change).")
                 .into_any_element(),
             QueryResult::Success(LoadedPatch {
-                content: PreparedPatch::Rows { rows, widest, .. },
+                content: content @ PreparedPatch::Rows { rows, .. },
                 ..
             }) => {
+                let widest = content.widest_row(window);
                 let rows = Arc::clone(rows);
                 let selection = self
                     .selection
@@ -1072,8 +1105,8 @@ impl ComparisonView {
                                 .pl(px(DIFF_GUTTER_WIDTH))
                                 .flex()
                                 .bg(theme.diff(*tone))
-                                .font_family(DIFF_FONT)
-                                .text_size(px(13.))
+                                .font(gpui::font(DIFF_FONT))
+                                .text_size(px(DIFF_FONT_SIZE))
                                 .child(row_selection.update(cx, |selection, cx| {
                                     selection
                                         .row(index, text.clone(), source.clone(), window, cx)
@@ -1092,7 +1125,7 @@ impl ComparisonView {
                         }
                     });
                 }))
-                .with_width_from_item(*widest)
+                .with_width_from_item(widest)
                 .with_decoration(gutter)
                 .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
                 .size_full()
