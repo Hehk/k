@@ -17,6 +17,8 @@ use crate::{repository_model::RepositorySnapshot, top_bar::model::Tab};
 
 pub use kestrel::model::OpenViewIn;
 
+const REPOSITORY_POLL_INTERVAL: Duration = Duration::from_secs(120);
+
 pub struct Session(pub Entity<Workspace>);
 impl Global for Session {}
 
@@ -134,6 +136,7 @@ pub struct Workspace {
     native_windows: HashMap<WindowId, AnyWindowHandle>,
     repository_snapshots: HashMap<PathBuf, Entity<RepositorySnapshot>>,
     watching_repositories: bool,
+    repository_poll_task: Option<Task<()>>,
     // Native focus can be absent while the persisted active window still names the last window.
     foreground: Option<WindowId>,
     _subscriptions: Vec<Subscription>,
@@ -180,6 +183,7 @@ impl Workspace {
             native_windows: HashMap::new(),
             repository_snapshots: HashMap::new(),
             watching_repositories: false,
+            repository_poll_task: None,
             foreground: None,
             _subscriptions: vec![quit, closed],
         }
@@ -192,6 +196,23 @@ impl Workspace {
         self.watching_repositories = true;
         self.refresh_repositories(cx);
         self.synchronize_repository_watches(cx);
+        self.repository_poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(REPOSITORY_POLL_INTERVAL)
+                    .await;
+                let running = this.update(cx, |this, cx| {
+                    if this.model.stopped() {
+                        return false;
+                    }
+                    this.refresh_repositories(cx);
+                    true
+                });
+                if !matches!(running, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     pub fn refresh_repositories(&mut self, cx: &mut Context<Self>) {
@@ -433,6 +454,7 @@ impl Workspace {
     }
 
     fn flush_on_quit(&mut self) {
+        self.repository_poll_task.take();
         let effects = self
             .model
             .transition(Event::Quit, self.context())

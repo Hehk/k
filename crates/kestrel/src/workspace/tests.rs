@@ -6,6 +6,7 @@ use kestrel::{git::RepositoryInfo, review::RefName};
 use super::*;
 
 mod persistence;
+mod repositories;
 mod viewing;
 
 fn project(state: &mut AppState, name: &str) -> kestrel::state::ProjectId {

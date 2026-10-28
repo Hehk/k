@@ -37,6 +37,10 @@ impl RepositorySnapshot {
         this
     }
 
+    pub fn query(&self) -> &Query<Snapshot> {
+        &self.query
+    }
+
     pub(super) fn watch_error(&self) -> Option<&str> {
         self.watcher.error()
     }

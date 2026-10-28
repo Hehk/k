@@ -57,7 +57,7 @@ impl RepositoryModel {
     }
 
     pub fn snapshot<'a>(&self, cx: &'a App) -> &'a Query<Snapshot> {
-        &self.snapshot.read(cx).query
+        self.snapshot.read(cx).query()
     }
 
     pub fn watch_error<'a>(&self, cx: &'a App) -> Option<&'a str> {
