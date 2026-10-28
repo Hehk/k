@@ -97,8 +97,8 @@ impl Theme {
         let text = paper.blend(neutrals.text);
         let control = neutrals.shell.opacity(1.);
         let border = paper.blend(neutrals.border).blend(text.opacity(0.10));
-        let accent = contrasting(preferences.accent, paper, text, 3.);
-        Self {
+        let accent = contrasting(preferences.accent, &[paper], text, 3.);
+        let mut theme = Self {
             shell: control.blend(paper.opacity(0.4)),
             paper,
             text,
@@ -116,7 +116,7 @@ impl Theme {
             input_border: if preferences.increase_contrast {
                 text
             } else {
-                contrasting(border, paper, text, 3.)
+                contrasting(border, &[paper], text, 3.)
             },
             control,
             hover: control.blend(text.opacity(0.06)),
@@ -136,7 +136,26 @@ impl Theme {
             added: color(0xe6eddb, 0x26362b),
             deleted: color(0xf4e3dd, 0x402b29),
             metadata: paper.blend(control.opacity(0.5)),
-        }
+        };
+        // One secondary color serves labels, inactive tabs and diff gutters.
+        // Resolve against every surface it appears on, not just the paper.
+        theme.muted = contrasting(
+            theme.muted,
+            &[
+                theme.paper,
+                theme.added,
+                theme.deleted,
+                theme.metadata,
+                theme.shell,
+                theme.control,
+                theme.hover,
+                theme.pressed,
+                theme.selection,
+            ],
+            text,
+            4.5,
+        );
+        theme
     }
 
     pub fn diff(&self, tone: DiffTone) -> Hsla {
@@ -166,12 +185,15 @@ fn contrast(a: Hsla, b: Hsla) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-fn contrasting(color: Hsla, background: Hsla, ink: Hsla, minimum: f32) -> Hsla {
-    // System accents can be too faint on custom paper surfaces. Mix toward our
-    // ink only as much as legibility needs, rather than replacing the accent.
+fn contrasting(color: Hsla, backgrounds: &[Hsla], ink: Hsla, minimum: f32) -> Hsla {
+    // Semantic colors can be too faint on custom surfaces. Mix toward the
+    // system ink only as much as legibility needs, preserving passing colors.
     for step in 0..=20 {
         let candidate = color.blend(ink.opacity(step as f32 / 20.));
-        if contrast(candidate, background) >= minimum {
+        if backgrounds
+            .iter()
+            .all(|background| contrast(candidate, *background) >= minimum)
+        {
             return candidate;
         }
     }
