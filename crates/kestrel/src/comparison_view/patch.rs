@@ -107,14 +107,9 @@ impl PreparedPatch {
         if !terminated {
             plain.pop();
         }
-        let widest = rows
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, row)| row.text.len())
-            .map(|(index, _)| index);
         Ok(Self::Rows {
             rows: rows.into(),
-            widest,
+            widest: Default::default(),
             text: plain.into(),
         })
     }
