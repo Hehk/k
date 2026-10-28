@@ -11,7 +11,8 @@
 
   outputs = { nixpkgs, rust-overlay, ... }:
     let
-      systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
+      # Only the verified development target; see docs/platforms.md.
+      systems = [ "aarch64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in {
       devShells = forAllSystems (system:
