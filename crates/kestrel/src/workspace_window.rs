@@ -13,7 +13,7 @@ use kestrel::{
 use crate::{
     appearance::{self, Preferences, Theme},
     commands::{self, Command},
-    controls::control as button,
+    controls::{control as button, single_line},
     recent_views::{RecentEvent, RecentViews},
     repository_view::RepositoryView,
     top_bar::{
@@ -605,7 +605,7 @@ impl Render for Kestrel {
         let title = tab
             .map(|tab| tab_title(workspace.state(), tab))
             .unwrap_or_else(|| "Home".into());
-        let directory = project.map(|project| project.directory.display().to_string());
+        let directory = project.map(|project| single_line(&project.directory.to_string_lossy()));
         let native_title = match &directory {
             Some(directory) => format!("{title} — {directory} — Kestrel"),
             None => format!("{title} — Kestrel"),

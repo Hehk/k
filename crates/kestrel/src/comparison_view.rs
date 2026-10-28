@@ -16,7 +16,7 @@ use kestrel::{
 
 use crate::{
     appearance::{DiffTone, Theme},
-    controls::{control, tooltip},
+    controls::{control, single_line, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
     repository_model::{RepositoryModel, branch_label, open},
 };
@@ -215,7 +215,7 @@ struct FileLabel {
 
 impl FileLabel {
     fn new(change: &FileChange) -> Self {
-        let label = path(change).label();
+        let label = single_line(&path(change).label());
         let (directory, name) = label
             .rsplit_once('/')
             .map_or((None, label.as_str()), |(directory, name)| {
@@ -233,7 +233,11 @@ impl FileLabel {
             directory,
             tooltip: match change {
                 FileChange::Renamed { old, new } => {
-                    format!("{} → {}", old.path.label(), new.path.label())
+                    format!(
+                        "{} → {}",
+                        single_line(&old.path.label()),
+                        single_line(&new.path.label())
+                    )
                 }
                 _ => label,
             },
@@ -649,7 +653,7 @@ impl ComparisonView {
             .current_key(cx)
             .and_then(|key| {
                 key.comparison
-                    .map(|comparison| format!("Base: {} ▾", comparison.base.label()))
+                    .map(|comparison| format!("Base: {} ▾", single_line(&comparison.base.label())))
             })
             .unwrap_or_else(|| "Choose base… ▾".into());
         div()
@@ -913,7 +917,7 @@ impl ComparisonView {
                             .id("diff-file-title")
                             .debug_selector(|| "diff-file-title".into())
                             .text_sm()
-                            .child(path(change).label())
+                            .child(single_line(&path(change).label()))
                             .when_some(
                                 self.patch.data().map(|patch| patch.status.clone()),
                                 |title, status| title.tooltip(tooltip(status)),

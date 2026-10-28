@@ -5,7 +5,7 @@ use kestrel::{
     state::{Project, Route, TabId, WindowId},
 };
 
-use crate::workspace::Workspace;
+use crate::{controls::single_line, workspace::Workspace};
 
 mod refresh;
 mod snapshot;
@@ -100,7 +100,7 @@ mod tests;
 pub fn branch_label(branch: &Branch) -> String {
     format!(
         "{} · {}",
-        branch.name.label(),
+        single_line(&branch.name.label()),
         if branch.remote { "Remote" } else { "Local" }
     )
 }

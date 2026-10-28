@@ -514,6 +514,20 @@ fn long_titles_stay_inside_their_slots_and_clear_of_close_buttons(cx: &mut TestA
 }
 
 #[gpui::test]
+fn title_painter_escapes_controls_even_for_raw_drag_titles(cx: &mut TestAppContext) {
+    let (preview, cx) = cx.add_window_view(|_, _| DragPreview {
+        title: "repo\nname\t\u{2028}".into(),
+        width: 200.,
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds(r"tab-title-repo\nname\t\u{2028}").is_some());
+    assert_eq!(
+        preview.read_with(cx, |preview, _| preview.title.clone()),
+        "repo\nname\t\u{2028}"
+    );
+}
+
+#[gpui::test]
 fn drag_preview_keeps_long_title_within_the_pill(cx: &mut TestAppContext) {
     let title = "k — experiment/top-bar-overflow/日本語/🦅".repeat(4);
     let selector = Box::leak(format!("tab-title-{title}").into_boxed_str());

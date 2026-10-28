@@ -13,6 +13,7 @@ pub(super) fn title(
     hover_background: Option<Hsla>,
     centered: bool,
 ) -> impl IntoElement {
+    let text = crate::controls::single_line(&text);
     let selector = format!("tab-title-{text}");
     div()
         .debug_selector(move || selector.clone())

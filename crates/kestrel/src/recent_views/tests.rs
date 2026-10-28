@@ -45,6 +45,35 @@ fn rows_show_tab_names_with_identity_and_shortcuts_in_tooltips() {
 }
 
 #[test]
+fn external_recent_labels_are_escaped_without_rewriting_history() {
+    for index in [0, 1] {
+        let mut record = fixture(index);
+        record.viewed.labels.repository = "repo\nname".into();
+        record.viewed.labels.directory = "/repo\nname\t".into();
+        record.viewed.labels.file = Some("src/file\rname.rs".into());
+        if let Destination::Comparison { branch, .. } = &mut record.viewed.snapshot.destination {
+            *branch = "refs/heads/topic\u{85}name".into();
+        }
+        let before = record.clone();
+        let entry = Entry::new(&record);
+        assert_eq!(
+            entry.title,
+            if index == 0 {
+                r"repo\nname"
+            } else {
+                r"repo\nname - topic\u{85}name"
+            }
+        );
+        assert!(entry.tooltip.contains("/repo\\nname\\t\n"));
+        assert!(entry.tooltip.contains("\nFile: src/file\\rname.rs\n"));
+        if index == 1 {
+            assert!(entry.tooltip.contains("\nrefs/heads/topic\\u{85}name\n"));
+        }
+        assert_eq!(record, before);
+    }
+}
+
+#[test]
 fn the_menu_keeps_only_as_many_rows_as_fit_without_scrolling() {
     assert_eq!(visible_limit(760.), 10);
     assert_eq!(visible_limit(400.), 10);

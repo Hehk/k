@@ -724,6 +724,49 @@ fn nested_filenames_stay_visible_and_identical_names_select_distinct_files(
 }
 
 #[gpui::test]
+fn escaped_file_labels_keep_raw_selection_and_source_copy(cx: &mut TestAppContext) {
+    const PATH: &str = "nested\nparent/file\tname.rs";
+    let fixture = Fixture::new();
+    let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
+    let source = "repo\nname\twith spaces\n";
+    fixture.commit_files(
+        "refs/heads/topic",
+        Some(main),
+        400,
+        &[("file.rs", "before\n"), (PATH, source)],
+    );
+    let (workspace, handle) = fixture.start(cx);
+    let tab = active(&workspace, 0, cx);
+    let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+    click(cx, "branch:refs/heads/topic");
+    click(cx, "changed-file-0");
+    let row = cx.debug_bounds("changed-file-0").unwrap();
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    redraw(cx);
+    assert!(
+        cx.debug_bounds(r"tooltip-nested\nparent/file\tname.rs")
+            .is_some()
+    );
+    workspace.read_with(cx, |workspace, _| {
+        let review = workspace
+            .state()
+            .tab(tab)
+            .unwrap()
+            .route
+            .review()
+            .unwrap()
+            .active_review()
+            .unwrap();
+        assert_eq!(review.browsing.file, Some(PATH.into()));
+    });
+    click(cx, "diff-source-1");
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), source));
+}
+
+#[gpui::test]
 fn diff_selection_copies_only_source_and_resets_on_file_changes(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let main = fixture.git.refname_to_id("refs/heads/main").unwrap();
