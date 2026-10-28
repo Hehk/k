@@ -5,9 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use gpui::{
-    AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task, WeakEntity,
-};
+use gpui::{AnyWindowHandle, App, AppContext, Context, Entity, Global, Subscription, Task};
 use kestrel::{
     model::{self, Effect, Event, Model, Persistence, SaveBatch, SaveResult},
     state::{AppState, Navigation, Project, Route, StateError, TabId, WindowId},
@@ -134,7 +132,7 @@ pub struct Workspace {
     save_task: Option<Task<()>>,
     notice: Option<String>,
     native_windows: HashMap<WindowId, AnyWindowHandle>,
-    repository_snapshots: HashMap<PathBuf, WeakEntity<RepositorySnapshot>>,
+    repository_snapshots: HashMap<PathBuf, Entity<RepositorySnapshot>>,
     watching_repositories: bool,
     // Native focus can be absent while the persisted active window still names the last window.
     foreground: Option<WindowId>,
@@ -143,7 +141,9 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(loaded: LoadedWorkspace, cx: &mut Context<Self>) -> Self {
-        let quit = cx.on_app_quit(|this, _| {
+        let quit = cx.on_app_quit(|this, cx| {
+            this.watching_repositories = false;
+            this.synchronize_repository_watches(cx);
             this.flush_on_quit();
             std::future::ready(())
         });
@@ -186,16 +186,45 @@ impl Workspace {
     }
 
     pub fn start_watching_repositories(&mut self, cx: &mut Context<Self>) {
-        if self.watching_repositories {
+        if self.model.stopped() || self.watching_repositories {
             return;
         }
         self.watching_repositories = true;
-        for snapshot in self
-            .repository_snapshots
-            .values()
-            .filter_map(WeakEntity::upgrade)
-        {
-            snapshot.update(cx, |snapshot, cx| snapshot.start_watching(cx));
+        self.refresh_repositories(cx);
+        self.synchronize_repository_watches(cx);
+    }
+
+    pub fn refresh_repositories(&mut self, cx: &mut Context<Self>) {
+        if self.model.stopped() {
+            return;
+        }
+        for project in self.state().projects().to_vec() {
+            if let Some(snapshot) = self.repository_snapshots.get(&project.common_dir) {
+                snapshot.update(cx, |snapshot, cx| snapshot.refresh(cx));
+            } else {
+                self.repository_snapshot(&project, cx);
+            }
+        }
+    }
+
+    fn repository_is_open(&self, project: &Project) -> bool {
+        self.state().windows().iter().any(|window| {
+            window
+                .tabs
+                .iter()
+                .any(|tab| tab.route.project() == Some(project.id))
+        })
+    }
+
+    fn synchronize_repository_watches(&mut self, cx: &mut Context<Self>) {
+        let projects = self.model.state().projects();
+        self.repository_snapshots
+            .retain(|common, _| projects.iter().any(|project| &project.common_dir == common));
+        for project in projects {
+            if let Some(snapshot) = self.repository_snapshots.get(&project.common_dir) {
+                let watching = self.watching_repositories && self.repository_is_open(project);
+                snapshot.update(cx, |snapshot, cx| snapshot.set_watching(watching, cx));
+            }
         }
     }
 
@@ -204,22 +233,15 @@ impl Workspace {
         project: &Project,
         cx: &mut Context<Self>,
     ) -> Entity<RepositorySnapshot> {
-        // Views own the lifetime; remembered projects must not keep refresh workers alive.
-        self.repository_snapshots
-            .retain(|_, snapshot| snapshot.upgrade().is_some());
-        if let Some(snapshot) = self
-            .repository_snapshots
-            .get(&project.common_dir)
-            .and_then(WeakEntity::upgrade)
-        {
-            return snapshot;
+        if let Some(snapshot) = self.repository_snapshots.get(&project.common_dir) {
+            return snapshot.clone();
         }
         let snapshot = cx.new(|cx| RepositorySnapshot::new(project.clone(), cx));
-        if self.watching_repositories {
-            snapshot.update(cx, |snapshot, cx| snapshot.start_watching(cx));
+        if self.watching_repositories && self.repository_is_open(project) {
+            snapshot.update(cx, |snapshot, cx| snapshot.set_watching(true, cx));
         }
         self.repository_snapshots
-            .insert(project.common_dir.clone(), snapshot.downgrade());
+            .insert(project.common_dir.clone(), snapshot.clone());
         snapshot
     }
 
@@ -380,7 +402,10 @@ impl Workspace {
     fn run_effects(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
-                Effect::Changed => cx.notify(),
+                Effect::Changed => {
+                    self.synchronize_repository_watches(cx);
+                    cx.notify();
+                }
                 Effect::ScheduleSave(id) => {
                     self.save_task = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor()

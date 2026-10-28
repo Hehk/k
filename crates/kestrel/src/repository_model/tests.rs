@@ -266,9 +266,8 @@ fn watcher_setup_failure_preserves_readable_snapshot_data(cx: &mut TestAppContex
         fixture.dir.path().join("moved"),
     )
     .unwrap();
-    fixture.workspace.update(cx, |workspace, cx| {
-        workspace.start_watching_repositories(cx)
-    });
+    let snapshot = repository.read_with(cx, |repository, _| repository.snapshot.clone());
+    snapshot.update(cx, |snapshot, cx| snapshot.set_watching(true, cx));
     cx.run_until_parked();
     repository.read_with(cx, |repository, cx| {
         assert!(repository.watch_error(cx).is_some());
@@ -278,9 +277,71 @@ fn watcher_setup_failure_preserves_readable_snapshot_data(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn tabs_and_linked_worktrees_share_snapshot_without_retaining_it_after_close(
-    cx: &mut TestAppContext,
-) {
+fn a_manual_sweep_refreshes_inactive_repositories_and_isolates_failures(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let tip = fixture.commit();
+    let repository = fixture.model(cx);
+    cx.run_until_parked();
+    let cached = repository.read_with(cx, |repository, _| repository.snapshot.downgrade());
+    drop(repository);
+    let missing = fixture.workspace.update(cx, |workspace, cx| {
+        workspace
+            .edit(
+                |state| {
+                    state.close_tab(fixture.tab);
+                    let root = fixture.dir.path().canonicalize().unwrap().join("missing");
+                    let id = state.register_project(&kestrel::git::RepositoryInfo {
+                        directory: root.clone(),
+                        common_dir: root.join(".git"),
+                        current_branch: None,
+                    })?;
+                    Ok(state.project(id)?.clone())
+                },
+                cx,
+            )
+            .unwrap()
+    });
+    fixture
+        .git
+        .reference("refs/heads/inactive-update", tip, true, "fixture")
+        .unwrap();
+    let before = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.state().clone());
+    fixture
+        .workspace
+        .update(cx, |workspace, cx| workspace.refresh_repositories(cx));
+    cx.run_until_parked();
+    let healthy = cached.upgrade().unwrap();
+    healthy.read_with(cx, |snapshot, _| {
+        assert!(snapshot.query.error().is_none());
+        assert!(
+            snapshot
+                .query
+                .data()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.name.0 == b"refs/heads/inactive-update")
+        );
+    });
+    let unavailable = fixture.workspace.update(cx, |workspace, cx| {
+        workspace.repository_snapshot(&missing, cx)
+    });
+    unavailable.read_with(cx, |snapshot, _| {
+        assert!(snapshot.query.error().is_some());
+        assert!(!snapshot.query.is_fetching());
+    });
+    assert_eq!(
+        fixture
+            .workspace
+            .read_with(cx, |workspace, _| workspace.state().clone()),
+        before
+    );
+}
+
+#[gpui::test]
+fn tabs_and_linked_worktrees_share_cached_snapshot_after_views_close(cx: &mut TestAppContext) {
     let fixture = Fixture::new(cx);
     let tip = fixture.commit();
     fixture
@@ -343,9 +404,16 @@ fn tabs_and_linked_worktrees_share_snapshot_without_retaining_it_after_close(
     drop(second);
     cx.update(|_| {});
     cx.run_until_parked();
-    assert!(shared.upgrade().is_none());
+    assert!(shared.upgrade().is_some());
     let reopened = fixture.model(cx);
     reopened.read_with(cx, |repository, cx| {
-        assert!(repository.snapshot(cx).is_loading())
+        assert!(repository.snapshot(cx).data().is_some());
+        assert!(!repository.snapshot(cx).is_fetching());
+        assert_eq!(repository.snapshot, shared.upgrade().unwrap());
     });
+    drop(reopened);
+    drop(fixture);
+    cx.update(|_| {});
+    cx.run_until_parked();
+    assert!(shared.upgrade().is_none());
 }

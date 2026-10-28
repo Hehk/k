@@ -10,6 +10,7 @@ use crate::workspace::Workspace;
 mod refresh;
 mod snapshot;
 mod watch;
+mod watch_lifecycle;
 pub use snapshot::RepositorySnapshot;
 
 pub struct RepositoryModel {
@@ -60,7 +61,7 @@ impl RepositoryModel {
     }
 
     pub fn watch_error<'a>(&self, cx: &'a App) -> Option<&'a str> {
-        self.snapshot.read(cx).watch_error.as_deref()
+        self.snapshot.read(cx).watch_error()
     }
 
     pub fn route<'a>(&self, cx: &'a App) -> Option<&'a Route> {

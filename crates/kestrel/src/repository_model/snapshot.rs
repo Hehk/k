@@ -7,6 +7,7 @@ use super::{
     open,
     refresh::{Effect, Input, Scheduler},
     watch::RefWatch,
+    watch_lifecycle::{self, Lifecycle},
 };
 
 const EVENT_COALESCE_DELAY: Duration = Duration::from_millis(100);
@@ -14,7 +15,7 @@ const EVENT_COALESCE_DELAY: Duration = Duration::from_millis(100);
 pub struct RepositorySnapshot {
     project: Project,
     pub(super) query: Query<Snapshot>,
-    pub(super) watch_error: Option<String>,
+    watcher: Lifecycle,
     scheduler: Scheduler,
     task: Option<Task<()>>,
     delay: Option<Task<()>>,
@@ -26,7 +27,7 @@ impl RepositorySnapshot {
         let mut this = Self {
             project,
             query: Query::new(),
-            watch_error: None,
+            watcher: Lifecycle::default(),
             scheduler: Scheduler::default(),
             task: None,
             delay: None,
@@ -36,10 +37,37 @@ impl RepositorySnapshot {
         this
     }
 
-    pub fn start_watching(&mut self, cx: &mut Context<Self>) {
-        if self.monitor.is_some() {
+    pub(super) fn watch_error(&self) -> Option<&str> {
+        self.watcher.error()
+    }
+
+    pub fn set_watching(&mut self, watching: bool, cx: &mut Context<Self>) {
+        let input = if watching {
+            watch_lifecycle::Input::Requested
+        } else {
+            watch_lifecycle::Input::Released
+        };
+        self.dispatch_watch(input, cx);
+    }
+
+    fn dispatch_watch(&mut self, input: watch_lifecycle::Input, cx: &mut Context<Self>) {
+        let effects = self.watcher.update(input);
+        if effects.is_empty() {
             return;
         }
+        for effect in effects {
+            match effect {
+                watch_lifecycle::Effect::Start { generation } => self.attach_watch(generation, cx),
+                watch_lifecycle::Effect::Stop => {
+                    self.monitor.take();
+                }
+                watch_lifecycle::Effect::RefreshRefs => self.refresh(cx),
+            }
+        }
+        cx.notify();
+    }
+
+    fn attach_watch(&mut self, generation: u64, cx: &mut Context<Self>) {
         let common = self.project.common_dir.clone();
         let setup = cx
             .background_executor()
@@ -49,26 +77,37 @@ impl RepositorySnapshot {
                 Ok(watch) => watch,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.watch_error = Some(error);
-                        cx.notify();
+                        this.dispatch_watch(
+                            watch_lifecycle::Input::Failed { generation, error },
+                            cx,
+                        );
                     });
                     return;
                 }
             };
-            // Reconcile after attachment, even if the initial read finished before watching began.
-            if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+            let attached = this.update(cx, |this, cx| {
+                this.dispatch_watch(watch_lifecycle::Input::Started { generation }, cx);
+                this.watcher.is_watching(generation)
+            });
+            if !matches!(attached, Ok(true)) {
                 return;
             }
             while watch.events.recv().await.is_ok() {
                 let failure = watch.failure();
-                if this
-                    .update(cx, |this, cx| {
-                        this.watch_error = failure;
-                        this.dispatch(Input::Invalidated, cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
+                let active = this.update(cx, |this, cx| {
+                    if !this.watcher.is_watching(generation) {
+                        return false;
+                    }
+                    match failure {
+                        Some(error) => this.dispatch_watch(
+                            watch_lifecycle::Input::Failed { generation, error },
+                            cx,
+                        ),
+                        None => this.dispatch(Input::Invalidated, cx),
+                    }
+                    this.watcher.is_watching(generation)
+                });
+                if !matches!(active, Ok(true)) {
                     break;
                 }
             }
@@ -117,3 +156,6 @@ impl RepositorySnapshot {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests;
