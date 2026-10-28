@@ -1,5 +1,10 @@
 # Kestrel
 
+## Accessibility
+
+Custom repository and diff content is not yet accessible through VoiceOver.
+See the [integration blocker and acceptance requirements](docs/accessibility.md).
+
 ## Development
 
 On macOS, install Xcode and its command-line tools. GPUI compiles Metal shaders, so the separate Metal toolchain component must also be installed if Xcode has not installed it already:
