@@ -1,13 +1,17 @@
-"""Headless Git fixture regressions; no native application is launched."""
+"""Headless smoke-harness regressions; no native application is launched."""
 
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import macos_navigation_smoke as smoke
 from macos_navigation_smoke import seed
 
 
@@ -137,6 +141,233 @@ class SeedTests(unittest.TestCase):
                     self.assert_seeded(config)
                     self.assertEqual(dict(os.environ), environment)
                 self.assertEqual(self.snapshot(unrelated), before)
+
+
+class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="kestrel-smoke-evidence-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.stdout = patch("sys.stdout", new_callable=io.StringIO).start()
+        self.addCleanup(patch.stopall)
+
+    def observations(self, evidence):
+        return list(map(json.loads, (evidence.root / "observations.jsonl").read_text().splitlines()))
+
+    def result(self, evidence):
+        return json.loads((evidence.root / "result.json").read_text())
+
+    def test_success_retains_private_evidence_and_unsupported_checks(self):
+        with smoke.RunArtifacts(self.root) as evidence:
+            seed(evidence.root)
+            evidence.unsupported_check("popup paint is not observable")
+            smoke.wait_for("persisted", lambda: {"count": 3}, lambda value: value["count"] == 3,
+                           record=evidence.record)
+        self.assertEqual(self.result(evidence)["status"], "passed")
+        self.assertEqual(self.result(evidence)["unsupported_checks"], ["popup paint is not observable"])
+        self.assertTrue((evidence.root / "kestrel/state.history.jsonl").is_file())
+        self.assertEqual(evidence.root.stat().st_mode & 0o777, 0o700)
+        self.assertIn("UNSUPPORTED", self.stdout.getvalue())
+        self.assertIn(str(evidence.root), self.stdout.getvalue())
+        self.assertTrue(any(row["event"] == "observation" and row["observation"] == {"count": 3}
+                            for row in self.observations(evidence)))
+
+    def test_failed_check_records_the_actual_value(self):
+        with self.assertRaisesRegex(AssertionError, "older pins"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                evidence.check("older pins", False, {"expected": "old", "actual": "new"})
+        self.assertEqual(self.result(evidence)["status"], "failed")
+        self.assertTrue(any(row["event"] == "failed" and row.get("observation") == {"expected": "old", "actual": "new"}
+                            for row in self.observations(evidence)))
+
+    def test_timeout_retains_last_observation_and_original_files(self):
+        with self.assertRaisesRegex(AssertionError, "timed out; last observation: 3"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                state = evidence.root / "kestrel/state.json"
+                state.parent.mkdir()
+                state.write_bytes(b'{"interrupted":')
+                (state.parent / "state.history.jsonl").write_bytes(b'fixture journal\n')
+                (evidence.root / "app.log").write_text("non-panic diagnostic\n")
+                smoke.wait_for("four viewings", lambda: 3, lambda value: value == 4,
+                               timeout=0.01, record=evidence.record)
+        self.assertEqual(self.result(evidence)["status"], "failed")
+        self.assertEqual((evidence.root / "failure-state/state.json").read_bytes(), b'{"interrupted":')
+        self.assertEqual((evidence.root / "failure-state/state.history.jsonl").read_bytes(), b'fixture journal\n')
+        self.assertEqual((evidence.root / "failure-state/app.log").read_text(), "non-panic diagnostic\n")
+        self.assertIn("four viewings", (evidence.root / "harness.log").read_text())
+        self.assertTrue(any(row["event"] == "failed" and row.get("observation") == 3
+                            for row in self.observations(evidence)))
+
+    def test_assertions_and_interruptions_are_not_reported_as_passes(self):
+        for exception in [AssertionError("wrong pins"), KeyboardInterrupt()]:
+            with self.subTest(exception=type(exception).__name__):
+                with self.assertRaises(type(exception)):
+                    with smoke.RunArtifacts(self.root) as evidence:
+                        evidence.record("action", "reopen pinned view")
+                        raise exception
+                self.assertEqual(self.result(evidence)["status"], "failed")
+                self.assertTrue((evidence.root / "harness.log").is_file())
+
+    def test_failure_snapshot_precedes_shutdown_and_cleanup_does_not_mask_failure(self):
+        app = Mock(pid=123, returncode=-15)
+        app.poll.return_value = None
+        with self.assertRaisesRegex(AssertionError, "original failure"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                state = evidence.root / "kestrel/state.json"
+                state.parent.mkdir()
+                state.write_text("before cleanup")
+
+                def terminate():
+                    state.write_text("shutdown flushed state")
+                    raise OSError("cleanup failure")
+
+                app.terminate.side_effect = terminate
+                with patch.object(smoke.subprocess, "Popen", return_value=app):
+                    with smoke.application(["never-launched"], evidence):
+                        raise AssertionError("original failure")
+        self.assertEqual((evidence.root / "failure-state/state.json").read_text(), "before cleanup")
+        self.assertEqual(state.read_text(), "shutdown flushed state")
+        self.assertIn("original failure", self.result(evidence)["error"])
+        self.assertTrue(any(row["description"] == "application cleanup" and row["error"] == "cleanup failure"
+                            for row in self.observations(evidence)))
+
+    def test_headless_child_log_and_config_are_isolated_on_success(self):
+        unrelated = self.root / "real-config"
+        unrelated.mkdir()
+        sentinel = unrelated / "state.json"
+        sentinel.write_text("private user state must not be read or copied")
+        with patch.dict(os.environ, XDG_CONFIG_HOME=str(unrelated)):
+            with smoke.RunArtifacts(self.root) as evidence:
+                code = "import os; from pathlib import Path; p = Path(os.environ['XDG_CONFIG_HOME']); (p / 'child-marker').write_text('fixture'); print('ordinary diagnostic')"
+                with smoke.application([sys.executable, "-c", code], evidence) as app:
+                    self.assertEqual(app.wait(timeout=5), 0)
+        self.assertEqual(self.result(evidence)["status"], "passed")
+        self.assertEqual((evidence.root / "child-marker").read_text(), "fixture")
+        self.assertEqual((evidence.root / "app.log").read_text(), "ordinary diagnostic\n")
+        self.assertEqual(sentinel.read_text(), "private user state must not be read or copied")
+        self.assertFalse((unrelated / "child-marker").exists())
+        for path in evidence.root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(b"private user state", path.read_bytes())
+
+    def test_child_panic_and_launch_failure_are_retained(self):
+        with self.assertRaisesRegex(AssertionError, "panicked"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                with smoke.application([sys.executable, "-c", "print('thread panicked: synthetic')"], evidence) as app:
+                    app.wait(timeout=5)
+        self.assertEqual(self.result(evidence)["status"], "failed")
+        self.assertIn("synthetic", (evidence.root / "app.log").read_text())
+        with self.assertRaises(FileNotFoundError):
+            with smoke.RunArtifacts(self.root) as missing:
+                with smoke.application([str(self.root / "no-such-binary")], missing):
+                    self.fail("unreachable")
+        self.assertEqual(self.result(missing)["status"], "failed")
+        self.assertTrue((missing.root / "app.log").exists())
+
+    def test_shutdown_escalates_with_bounded_waits(self):
+        app = Mock(pid=123, returncode=-9)
+        app.poll.return_value = None
+        app.wait.side_effect = [subprocess.TimeoutExpired("fixture", 5), -9]
+        with smoke.RunArtifacts(self.root) as evidence:
+            with patch.object(smoke.subprocess, "Popen", return_value=app):
+                with smoke.application(["never-launched"], evidence):
+                    pass
+        app.terminate.assert_called_once_with()
+        app.kill.assert_called_once_with()
+        self.assertEqual([call.kwargs for call in app.wait.call_args_list], [{"timeout": 5}, {"timeout": 5}])
+
+    def test_permission_gates_are_blocked_without_seeding_or_launching(self):
+        for accessibility, screenshots in [(False, False), (True, True)]:
+            with self.subTest(accessibility=accessibility):
+                native = Mock()
+                native.AXIsProcessTrusted.return_value = accessibility
+                native.CGPreflightScreenCaptureAccess.return_value = False
+                args = ["smoke", "--run", "--artifacts", str(self.root)]
+                if screenshots:
+                    args += ["--screenshots", str(self.root / "captures")]
+                with patch.object(sys, "argv", args), patch.object(sys, "platform", "darwin"), \
+                     patch.object(smoke.ctypes, "CDLL", return_value=native), \
+                     patch.object(smoke, "seed") as seed_mock, \
+                     patch.object(smoke.subprocess, "Popen") as popen, \
+                     patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(smoke.main(), 2)
+                seed_mock.assert_not_called()
+                popen.assert_not_called()
+        reports = [json.loads(path.read_text()) for path in self.root.glob("*/result.json")]
+        self.assertEqual([report["status"] for report in reports], ["blocked", "blocked"])
+        self.assertFalse((self.root / "captures").exists())
+
+    def test_native_runner_records_early_exit_without_sending_native_input(self):
+        native = Mock()
+        native.AXIsProcessTrusted.return_value = True
+        app = Mock(pid=123, returncode=17)
+        app.poll.return_value = 17
+        args = SimpleNamespace(binary=Path(sys.executable), screenshots=None)
+        with self.assertRaisesRegex(AssertionError, "application exited early \\(17\\)"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                fixture = seed(evidence.root)
+                with patch.object(sys, "platform", "darwin"), \
+                     patch.object(smoke.ctypes, "CDLL", return_value=native), \
+                     patch.object(smoke, "seed", return_value=fixture), \
+                     patch.object(smoke.subprocess, "Popen", return_value=app):
+                    smoke.run_native(args, evidence)
+        self.assertEqual(self.result(evidence)["status"], "failed")
+        native.CGEventPost.assert_not_called()
+        self.assertTrue((evidence.root / "failure-state/state.history.jsonl").is_file())
+        self.assertTrue(any(row["description"] == "startup restored one Home tab" and row["event"] == "failed"
+                            for row in self.observations(evidence)))
+
+    def test_snapshot_copy_error_does_not_replace_the_original_failure(self):
+        with self.assertRaisesRegex(AssertionError, "original failure"):
+            with smoke.RunArtifacts(self.root) as evidence:
+                (evidence.root / "app.log").write_text("still retained at the original path")
+                with patch.object(smoke.shutil, "copyfile", side_effect=OSError("copy failed")):
+                    evidence.snapshot_failure()
+                raise AssertionError("original failure")
+        self.assertEqual(self.result(evidence)["error"], "original failure")
+        self.assertTrue(any(row["description"] == "failure snapshot" and row["error"] == "copy failed"
+                            for row in self.observations(evidence)))
+        self.assertEqual((evidence.root / "app.log").read_text(), "still retained at the original path")
+
+    def test_help_does_not_check_permissions_or_create_artifacts(self):
+        with patch.object(sys, "argv", ["smoke", "--artifacts", str(self.root)]), \
+             patch.object(smoke.ctypes, "CDLL") as native:
+            self.assertEqual(smoke.main(), 0)
+        native.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_cli_success_and_failure_exit_codes_without_native_calls(self):
+        for failure, code in [(None, 0), (AssertionError("synthetic timeout"), 1)]:
+            with patch.object(sys, "argv", ["smoke", "--run", "--artifacts", str(self.root)]), \
+                 patch.object(smoke, "run_native", side_effect=failure), \
+                 patch("sys.stderr", new_callable=io.StringIO):
+                self.assertEqual(smoke.main(), code)
+        statuses = sorted(json.loads(path.read_text())["status"] for path in self.root.glob("*/result.json"))
+        self.assertEqual(statuses, ["failed", "passed"])
+
+
+class WaitTests(unittest.TestCase):
+    def test_wait_retries_missing_state_and_transient_ax_errors(self):
+        probe = Mock(side_effect=[None, subprocess.CalledProcessError(1, "osascript", output="window missing (-1719)"), 3])
+        record = Mock()
+        with patch.object(smoke.time, "sleep"):
+            self.assertEqual(smoke.wait_for("ready", probe, lambda value: value == 3, record=record), 3)
+        self.assertTrue(any(call.args[0] == "transient" for call in record.call_args_list))
+
+    def test_wait_does_not_hide_unexpected_probe_or_predicate_errors(self):
+        for error in [subprocess.CalledProcessError(1, "osascript", output="permission denied"), ValueError("bad state")]:
+            record = Mock()
+            with self.assertRaises(type(error)):
+                smoke.wait_for("ready", Mock(side_effect=error), lambda value: True, record=record)
+            self.assertEqual(record.call_args_list[-1].args[0], "failed")
+        with self.assertRaisesRegex(ValueError, "bad predicate"):
+            smoke.wait_for("ready", lambda: 3, Mock(side_effect=ValueError("bad predicate")))
+
+    def test_stability_resets_when_geometry_changes_or_condition_is_false(self):
+        stable = smoke.stable_for(lambda value: value > 0, seconds=0.5)
+        with patch.object(smoke.time, "monotonic", side_effect=[0, 0.4, 0.6, 1.2, 1.8, 2, 2.6]):
+            results = [stable(value) for value in [1, 1, 2, 2, 0, 2, 2]]
+        self.assertEqual(results, [False, False, False, True, False, False, True])
 
 
 if __name__ == "__main__":
