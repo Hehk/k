@@ -70,6 +70,14 @@ impl RepositoryModel {
         self.snapshot.read(cx).watch_error()
     }
 
+    pub fn watch_notice(&self, cx: &App) -> Option<String> {
+        self.watch_error(cx).map(|error| {
+            format!(
+                "Live ref watching is unavailable. Retrying every two minutes; Refresh local refs also retries now. {error}"
+            )
+        })
+    }
+
     pub fn route<'a>(&self, cx: &'a App) -> Option<&'a Route> {
         let state = self.workspace.read(cx).state();
         let window = state.window(self.window).ok()?;
@@ -82,8 +90,10 @@ impl RepositoryModel {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.snapshot
-            .update(cx, |snapshot, cx| snapshot.refresh(cx));
+        self.snapshot.update(cx, |snapshot, cx| {
+            snapshot.retry_watch(cx);
+            snapshot.refresh(cx);
+        });
     }
 }
 
