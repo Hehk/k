@@ -37,6 +37,14 @@ impl RepositorySnapshot {
         this
     }
 
+    pub fn synchronize_project(&mut self, project: &Project, cx: &mut Context<Self>) {
+        if self.project.directory != project.directory {
+            self.project = project.clone();
+            // The watcher already owns the common directory; only Git reads need retargeting.
+            self.refresh(cx);
+        }
+    }
+
     pub fn query(&self) -> &Query<Snapshot> {
         &self.query
     }
@@ -141,6 +149,7 @@ impl RepositorySnapshot {
 
     fn read(&mut self, cx: &mut Context<Self>) {
         let project = self.project.clone();
+        let directory = project.directory.clone();
         self.query.start();
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -152,7 +161,9 @@ impl RepositorySnapshot {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.query.complete(result);
+                if this.project.directory == directory {
+                    this.query.complete(result);
+                }
                 this.dispatch(Input::ReadFinished, cx);
                 cx.notify();
             });

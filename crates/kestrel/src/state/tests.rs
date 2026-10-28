@@ -497,6 +497,34 @@ fn worktrees_share_metadata_not_tab_identity_or_live_navigation() {
 }
 
 #[test]
+fn project_recovery_preserves_identity_and_rejects_obsolete_probes() {
+    let mut state = AppState::default();
+    let linked = info("linked", "refs/heads/topic");
+    let id = state.register_project(&linked).unwrap();
+    let previous = state.project(id).unwrap().clone();
+    let mut main = linked.clone();
+    main.directory = std::env::temp_dir().join("main");
+    state.recover_project(&previous, &main).unwrap();
+    assert_eq!(state.project(id).unwrap().directory, main.directory);
+    assert_eq!(state.project(id).unwrap().last_review, previous.last_review);
+    assert_eq!(state.register_project(&linked).unwrap(), id);
+    assert_eq!(state.project(id).unwrap().directory, main.directory);
+
+    let mut late = linked.clone();
+    late.directory = std::env::temp_dir().join("late");
+    state.recover_project(&previous, &late).unwrap();
+    assert_eq!(state.project(id).unwrap().directory, main.directory);
+    main.directory = "relative".into();
+    assert!(state.recover_project(&previous, &main).is_err());
+    assert!(
+        state
+            .recover_project(&previous, &info("unrelated", "refs/heads/topic"))
+            .is_err()
+    );
+    assert_round_trip(&state);
+}
+
+#[test]
 fn closing_a_tab_retains_a_reopening_snapshot_without_closing_other_routes() {
     let mut state = AppState::default();
     let project = state

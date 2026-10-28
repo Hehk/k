@@ -244,7 +244,10 @@ impl Workspace {
         for project in projects {
             if let Some(snapshot) = self.repository_snapshots.get(&project.common_dir) {
                 let watching = self.watching_repositories && self.repository_is_open(project);
-                snapshot.update(cx, |snapshot, cx| snapshot.set_watching(watching, cx));
+                snapshot.update(cx, |snapshot, cx| {
+                    snapshot.synchronize_project(project, cx);
+                    snapshot.set_watching(watching, cx);
+                });
             }
         }
     }

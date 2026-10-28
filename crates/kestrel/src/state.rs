@@ -406,6 +406,30 @@ impl AppState {
         Ok(id)
     }
 
+    /// Apply an explicitly discovered recovery location after the caller checks availability.
+    /// History registration never uses this path, and a late probe cannot undo a newer recovery.
+    pub fn recover_project(
+        &mut self,
+        previous: &Project,
+        info: &RepositoryInfo,
+    ) -> Result<(), StateError> {
+        if !info.directory.is_absolute() || info.common_dir != previous.common_dir {
+            return Err(StateError("recovery must preserve repository identity"));
+        }
+        let project = self
+            .projects
+            .iter_mut()
+            .find(|project| project.id == previous.id)
+            .ok_or(StateError("unknown project"))?;
+        if project.common_dir != previous.common_dir {
+            return Err(StateError("recovery must preserve repository identity"));
+        }
+        if project.directory == previous.directory {
+            project.directory = info.directory.clone();
+        }
+        Ok(())
+    }
+
     pub fn select_branch(&mut self, tab: TabId, branch: RefName) -> Result<(), StateError> {
         self.navigate(tab, Navigation::SelectBranch(branch))
     }
