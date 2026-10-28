@@ -2,6 +2,7 @@ use super::*;
 use kestrel::state::{BranchSort, RepositoryPage};
 
 mod acceptance;
+mod recovery;
 
 struct Fixture {
     dir: tempfile::TempDir,

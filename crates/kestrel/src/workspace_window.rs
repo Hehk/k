@@ -7,7 +7,9 @@ use gpui::{
 use kestrel::{
     git::{Repository, RepositoryInfo},
     query::{Query, QueryResult},
-    state::{Navigation, ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId},
+    state::{
+        Navigation, Project, ProjectId, RepositoryPage, Route, StateError, Tab, TabId, WindowId,
+    },
 };
 
 use crate::{
@@ -43,8 +45,9 @@ pub struct Kestrel {
     id: WindowId,
     focus: FocusHandle,
     selection: Option<(TabId, ProjectId)>,
+    selection_directory: Option<PathBuf>,
     repository: Query<Entity<RepositoryView>>,
-    repository_views: HashMap<TabId, (ProjectId, Entity<RepositoryView>)>,
+    repository_views: HashMap<TabId, (Project, Entity<RepositoryView>)>,
     repository_task: Option<Task<()>>,
     request: u64,
     open_task: Option<Task<()>>,
@@ -125,6 +128,7 @@ impl Kestrel {
             id,
             focus,
             selection: None,
+            selection_directory: None,
             repository: Query::new(),
             repository_views: HashMap::new(),
             repository_task: None,
@@ -485,10 +489,65 @@ impl Kestrel {
         if !self.accepts_open(&target, cx) {
             return;
         }
+        let previous = self
+            .workspace
+            .read(cx)
+            .state()
+            .projects()
+            .iter()
+            .find(|project| {
+                project.common_dir == info.common_dir && project.directory != info.directory
+            })
+            .cloned();
+        let Some(previous) = previous else {
+            self.apply_open(target, info, None, cx);
+            return;
+        };
+        self.opening = Some(target.clone());
+        self.open_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let discovered = discover(info.directory)?;
+                    if discovered.common_dir != info.common_dir {
+                        return Err("This path now belongs to a different repository.".into());
+                    }
+                    let recovery = crate::repository_model::open(&previous)
+                        .is_err()
+                        .then_some(previous);
+                    Ok((discovered, recovery))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.opening.as_ref() != Some(&target) {
+                    return;
+                }
+                this.opening = None;
+                if this.accepts_open(&target, cx) {
+                    match result {
+                        Ok((info, recovery)) => this.apply_open(target, info, recovery, cx),
+                        Err(error) => this.error = Some(error),
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn apply_open(
+        &mut self,
+        target: OpenTarget,
+        info: RepositoryInfo,
+        recovery: Option<Project>,
+        cx: &mut Context<Self>,
+    ) {
         let result = self.workspace.update(cx, |workspace, cx| {
             workspace.edit(
                 |state| {
                     let project = state.register_project(&info)?;
+                    if let Some(previous) = recovery {
+                        state.recover_project(&previous, &info)?;
+                    }
                     state.navigate(target.tab, Navigation::OpenProject(project))
                 },
                 cx,
@@ -515,17 +574,27 @@ impl Kestrel {
             });
         let state = self.workspace.read(cx).state();
         self.repository_views.retain(|tab, (project, _)| {
-            state.window(self.id).is_ok_and(|window| {
-                window
-                    .tabs
-                    .iter()
-                    .any(|item| item.id == *tab && item.route.project() == Some(*project))
-            })
+            state
+                .project(project.id)
+                .is_ok_and(|current| current.directory == project.directory)
+                && state.window(self.id).is_ok_and(|window| {
+                    window
+                        .tabs
+                        .iter()
+                        .any(|item| item.id == *tab && item.route.project() == Some(project.id))
+                })
         });
-        if self.selection == active {
+        let directory = active.and_then(|(_, project)| {
+            state
+                .project(project)
+                .ok()
+                .map(|project| project.directory.clone())
+        });
+        if self.selection == active && self.selection_directory == directory {
             return;
         }
         self.selection = active;
+        self.selection_directory = directory;
         self.request += 1;
         self.repository_task.take();
         self.repository = Query::new();
@@ -561,7 +630,7 @@ impl Kestrel {
                         Ok(()) => {
                             let workspace = this.workspace.clone();
                             let window = this.id;
-                            let project = view_project.id;
+                            let project = view_project.clone();
                             let view = cx.new(|cx| {
                                 RepositoryView::new(workspace, window, tab, view_project, cx)
                             });

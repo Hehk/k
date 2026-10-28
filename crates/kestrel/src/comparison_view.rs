@@ -385,7 +385,7 @@ impl ComparisonView {
         self.patch_key = None;
         self.review = Query::new();
         self.review.start();
-        let project = self.repository.read(cx).project().clone();
+        let project = self.repository.read(cx).project(cx).clone();
         let request = key.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -509,7 +509,7 @@ impl ComparisonView {
         if browsing.file.as_ref() != Some(path(&change)) {
             self.select_file(path(&change).clone(), cx);
         }
-        let project = self.repository.read(cx).project().clone();
+        let project = self.repository.read(cx).project(cx).clone();
         let revision = self.patch_revision;
         let selected_file = path(&change).clone();
         let cancellation = Cancellation::default();

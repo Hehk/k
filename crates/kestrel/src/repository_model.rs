@@ -52,8 +52,14 @@ impl RepositoryModel {
         self.tab
     }
 
-    pub fn project(&self) -> &Project {
-        &self.project
+    pub fn project<'a>(&'a self, cx: &'a App) -> &'a Project {
+        self.workspace
+            .read(cx)
+            .state()
+            .project(self.project.id)
+            .ok()
+            .filter(|project| project.common_dir == self.project.common_dir)
+            .unwrap_or(&self.project)
     }
 
     pub fn snapshot<'a>(&self, cx: &'a App) -> &'a Query<Snapshot> {
