@@ -8,6 +8,7 @@ use kestrel::{
     storage::Store,
 };
 
+mod freshness;
 mod retry;
 mod structural;
 
@@ -308,6 +309,7 @@ fn data(base: &str) -> ReviewData {
         },
         changes: Vec::new(),
         fresh: true,
+        freshness_read: RefRead::record(|| ()).1,
     }
 }
 

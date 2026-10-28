@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use gpui::{App, Context, Entity, Subscription};
 use kestrel::{
     git::{Branch, Repository, Snapshot},
@@ -12,6 +14,27 @@ mod snapshot;
 mod watch;
 mod watch_lifecycle;
 pub use snapshot::RepositorySnapshot;
+
+// Time the Git read on its worker, not its later delivery to the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefRead {
+    pub started: Instant,
+    pub finished: Instant,
+}
+
+impl RefRead {
+    pub fn record<T>(read: impl FnOnce() -> T) -> (T, Self) {
+        let started = Instant::now();
+        let result = read();
+        (
+            result,
+            Self {
+                started,
+                finished: Instant::now(),
+            },
+        )
+    }
+}
 
 pub struct RepositoryModel {
     workspace: Entity<Workspace>,
@@ -58,6 +81,10 @@ impl RepositoryModel {
 
     pub fn snapshot<'a>(&self, cx: &'a App) -> &'a Query<Snapshot> {
         self.snapshot.read(cx).query()
+    }
+
+    pub fn snapshot_read(&self, cx: &App) -> Option<RefRead> {
+        self.snapshot.read(cx).observed
     }
 
     pub fn watch_error<'a>(&self, cx: &'a App) -> Option<&'a str> {

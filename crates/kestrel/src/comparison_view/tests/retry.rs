@@ -12,7 +12,7 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     redraw(cx);
 }
 
-fn commit(git: &git2::Repository, parent: Option<git2::Oid>) -> git2::Oid {
+pub(super) fn commit(git: &git2::Repository, parent: Option<git2::Oid>) -> git2::Oid {
     let tree = git
         .find_tree(git.treebuilder(None).unwrap().write().unwrap())
         .unwrap();

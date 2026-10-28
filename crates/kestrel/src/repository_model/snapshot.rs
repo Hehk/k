@@ -4,7 +4,7 @@ use gpui::{Context, Task};
 use kestrel::{git::Snapshot, query::Query, state::Project};
 
 use super::{
-    open,
+    RefRead, open,
     refresh::{Effect, Input, Scheduler},
     watch::RefWatch,
     watch_lifecycle::{self, Lifecycle},
@@ -15,6 +15,7 @@ const EVENT_COALESCE_DELAY: Duration = Duration::from_millis(100);
 pub struct RepositorySnapshot {
     project: Project,
     pub(super) query: Query<Snapshot>,
+    pub(super) observed: Option<RefRead>,
     watcher: Lifecycle,
     scheduler: Scheduler,
     task: Option<Task<()>>,
@@ -27,6 +28,7 @@ impl RepositorySnapshot {
         let mut this = Self {
             project,
             query: Query::new(),
+            observed: None,
             watcher: Lifecycle::default(),
             scheduler: Scheduler::default(),
             task: None,
@@ -143,15 +145,20 @@ impl RepositorySnapshot {
         let project = self.project.clone();
         self.query.start();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, observed) = cx
                 .background_executor()
                 .spawn(async move {
-                    open(&project)?
-                        .snapshot()
-                        .map_err(|error| error.to_string())
+                    RefRead::record(|| {
+                        open(&project)?
+                            .snapshot()
+                            .map_err(|error| error.to_string())
+                    })
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.observed = Some(observed);
+                }
                 this.query.complete(result);
                 this.dispatch(Input::ReadFinished, cx);
                 cx.notify();
