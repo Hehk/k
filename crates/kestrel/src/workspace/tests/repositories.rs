@@ -115,6 +115,138 @@ fn inactive_repositories_refresh_every_two_minutes_without_duplicate_pollers(
 }
 
 #[gpui::test]
+fn focus_reconciles_missed_events_without_new_viewings(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.workspace.update(cx, |workspace, cx| {
+        let project = workspace.state().projects()[0].id;
+        let window = workspace
+            .edit(
+                |state| {
+                    let window = state.new_window()?;
+                    let tab = state.new_tab(window)?;
+                    state.open_project(project, tab)?;
+                    state.navigate(tab, Navigation::Home)?;
+                    Ok(window)
+                },
+                cx,
+            )
+            .unwrap();
+        workspace.window_activation(window, true, cx);
+        window
+    });
+    cx.run_until_parked();
+    let (state, history) = fixture.workspace.read_with(cx, |workspace, _| {
+        assert!(!workspace.viewing_history().records().is_empty());
+        (
+            workspace.state().clone(),
+            workspace.viewing_history().records().to_vec(),
+        )
+    });
+
+    // Home leaves this repository unwatched, so no native event can repair the cache.
+    for name in ["first-focus", "second-focus"] {
+        fixture.workspace.update(cx, |workspace, cx| {
+            workspace.window_activation(window, false, cx);
+        });
+        fixture.add_branch(name);
+        cx.run_until_parked();
+        assert!(!fixture.has_branch(name, cx));
+        fixture.workspace.update(cx, |workspace, cx| {
+            workspace.window_activation(window, true, cx);
+            assert!(fixture.snapshot.read(cx).query().is_fetching());
+        });
+        cx.run_until_parked();
+        assert!(fixture.has_branch(name, cx));
+        fixture.workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.state(), &state);
+            assert_eq!(workspace.viewing_history().records(), history);
+        });
+    }
+
+    fixture.add_branch("duplicate-activation");
+    fixture.workspace.update(cx, |workspace, cx| {
+        for _ in 0..10 {
+            workspace.window_activation(window, true, cx);
+        }
+        assert!(!fixture.snapshot.read(cx).query().is_fetching());
+    });
+    cx.run_until_parked();
+    assert!(!fixture.has_branch("duplicate-activation", cx));
+
+    fixture.workspace.update(cx, |workspace, cx| {
+        // All these requests arrive before the first read completes and share its scheduler.
+        for _ in 0..10 {
+            workspace.window_activation(window, false, cx);
+            workspace.window_activation(window, true, cx);
+        }
+    });
+    cx.run_until_parked();
+    assert!(fixture.has_branch("duplicate-activation", cx));
+    fixture.workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.state(), &state);
+        assert_eq!(workspace.viewing_history().records(), history);
+    });
+}
+
+#[gpui::test]
+fn focus_reconciliation_handles_window_switches_and_late_callbacks(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let (first, second) = fixture.workspace.update(cx, |workspace, cx| {
+        let first = workspace.edit(AppState::new_window, cx).unwrap();
+        let second = workspace.edit(AppState::new_window, cx).unwrap();
+        workspace.window_activation(first, true, cx);
+        (first, second)
+    });
+    cx.run_until_parked();
+    fixture.add_branch("window-switch");
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace.window_activation(second, true, cx);
+    });
+    cx.run_until_parked();
+    assert!(fixture.has_branch("window-switch", cx));
+
+    fixture.add_branch("late-callback");
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace.window_activation(first, false, cx);
+        workspace.window_activation(second, true, cx);
+        assert_eq!(workspace.foreground, Some(second));
+        assert!(!fixture.snapshot.read(cx).query().is_fetching());
+        workspace.close_window(first, cx);
+        workspace.window_activation(first, true, cx);
+        assert_eq!(workspace.foreground, Some(second));
+        workspace.window_activation(second, true, cx);
+        assert!(!fixture.snapshot.read(cx).query().is_fetching());
+    });
+    cx.run_until_parked();
+    assert!(!fixture.has_branch("late-callback", cx));
+}
+
+#[gpui::test]
+fn focus_reconciliation_requires_monitoring_and_does_not_restart_after_quit(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.workspace.update(cx, |workspace, cx| {
+        let window = workspace.edit(AppState::new_window, cx).unwrap();
+        workspace.watching_repositories = false;
+        workspace.window_activation(window, true, cx);
+        assert!(!fixture.snapshot.read(cx).query().is_fetching());
+        workspace.watching_repositories = true;
+        window
+    });
+    cx.quit();
+    fixture.add_branch("after-quit-focus");
+    fixture.workspace.update(cx, |workspace, cx| {
+        workspace.window_activation(window, false, cx);
+        workspace.window_activation(window, true, cx);
+        assert!(!fixture.snapshot.read(cx).query().is_fetching());
+        assert!(workspace.repository_poll_task.is_none());
+    });
+    cx.run_until_parked();
+    assert!(!fixture.has_branch("after-quit-focus", cx));
+}
+
+#[gpui::test]
 fn a_poll_discovers_new_repositories_and_isolates_unavailable_ones(cx: &mut TestAppContext) {
     let fixture = Fixture::new(cx);
     let git = git2::Repository::init(fixture.dir.path().join("later")).unwrap();

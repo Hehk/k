@@ -384,13 +384,17 @@ impl Workspace {
     }
 
     pub fn window_activation(&mut self, id: WindowId, active: bool, cx: &mut Context<Self>) {
+        if self.model.stopped() || self.state().window(id).is_err() {
+            return;
+        }
         if active {
             let changed = self.foreground != Some(id);
             self.foreground = Some(id);
-            if (changed || self.state().active_window() != Some(id))
-                && self.state().window(id).is_ok()
-            {
+            if changed || self.state().active_window() != Some(id) {
                 let _ = self.dispatch(Event::FocusWindow(id), cx);
+            }
+            if changed && self.watching_repositories {
+                self.refresh_repositories(cx);
             }
         } else if self.foreground == Some(id) {
             self.foreground = None;
