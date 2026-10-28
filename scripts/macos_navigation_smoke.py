@@ -37,13 +37,30 @@ class Point(ctypes.Structure):
 
 def seed(config):
     repo = config / "navigation-demo"
-    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    repo.mkdir()
+    # Match watch_refs.rs: inherit only PATH, never Git overrides or user config.
+    environment = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_AUTHOR_NAME": "Navigation Test",
+        "GIT_AUTHOR_EMAIL": "navigation@example.invalid",
+        "GIT_COMMITTER_NAME": "Navigation Test",
+        "GIT_COMMITTER_EMAIL": "navigation@example.invalid",
+    }
 
     def git(*args):
-        return subprocess.check_output(["git", "-C", str(repo), *args], text=True, stderr=subprocess.STDOUT).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(repo), "-c", f"core.hooksPath={os.devnull}",
+             "-c", "commit.gpgsign=false", *args],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+        ).strip()
 
-    git("config", "user.name", "Navigation Test")
-    git("config", "user.email", "navigation@example.invalid")
+    git("init", "--template=", "-b", "main")
 
     def commit(text):
         (repo / "file.rs").write_text(text)
