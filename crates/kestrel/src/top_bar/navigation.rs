@@ -6,9 +6,8 @@ use super::{
 };
 use crate::{appearance::Theme, controls::tooltip};
 
-// TODO: GPUI 0.2.2 has no accessibility-node API. Tooltips are not VoiceOver names;
-// expose these controls and the recent rows when that platform support is available.
-// Deferred task: kestrel/UI/macos_accessibility__plan.md in Obsidian.
+// TODO: Expose these controls and recent rows through a native accessibility bridge.
+// GPUI 0.2.2 has no node API; tooltips are not VoiceOver names. See docs/accessibility.md.
 pub const NAVIGATION_WIDTH: f32 = 96.;
 const BUTTON: f32 = 28.;
 const GAP: f32 = 2.;
