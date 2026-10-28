@@ -221,7 +221,12 @@ impl Workspace {
         }
         for project in self.state().projects().to_vec() {
             if let Some(snapshot) = self.repository_snapshots.get(&project.common_dir) {
-                snapshot.update(cx, |snapshot, cx| snapshot.refresh(cx));
+                snapshot.update(cx, |snapshot, cx| {
+                    // The two-minute sweep bounds automatic retries; focus can recover sooner.
+                    // Stopped watchers stay stopped, including cached inactive repositories.
+                    snapshot.retry_watch(cx);
+                    snapshot.refresh(cx);
+                });
             } else {
                 self.repository_snapshot(&project, cx);
             }

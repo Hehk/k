@@ -126,6 +126,10 @@ impl RepositorySnapshot {
         }));
     }
 
+    pub fn retry_watch(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_watch(watch_lifecycle::Input::RetryRequested, cx);
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.dispatch(Input::RefreshRequested, cx);
     }

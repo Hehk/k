@@ -4,6 +4,7 @@ pub(super) enum State {
     Stopped,
     Starting {
         generation: u64,
+        error: Option<String>,
     },
     Watching {
         generation: u64,
@@ -15,6 +16,7 @@ pub(super) enum State {
 
 pub(super) enum Input {
     Requested,
+    RetryRequested,
     Released,
     Started { generation: u64 },
     Failed { generation: u64, error: String },
@@ -37,6 +39,7 @@ impl Lifecycle {
     pub fn error(&self) -> Option<&str> {
         match &self.state {
             State::Failed { error } => Some(error),
+            State::Starting { error, .. } => error.as_deref(),
             _ => None,
         }
     }
@@ -47,14 +50,15 @@ impl Lifecycle {
 
     pub fn update(&mut self, input: Input) -> Vec<Effect> {
         match (&self.state, input) {
-            (State::Stopped, Input::Requested) => {
+            (State::Stopped, Input::Requested) | (State::Failed { .. }, Input::RetryRequested) => {
+                let error = self.error().map(str::to_owned);
                 let generation = self.next_generation;
                 self.next_generation = self.next_generation.wrapping_add(1);
-                self.state = State::Starting { generation };
+                self.state = State::Starting { generation, error };
                 vec![Effect::Start { generation }]
             }
             (
-                State::Starting { generation },
+                State::Starting { generation, .. },
                 Input::Started {
                     generation: started,
                 },
@@ -65,7 +69,7 @@ impl Lifecycle {
                 vec![Effect::RefreshRefs]
             }
             (
-                State::Starting { generation },
+                State::Starting { generation, .. },
                 Input::Failed {
                     generation: failed,
                     error,
@@ -89,8 +93,8 @@ impl Lifecycle {
                 self.state = State::Stopped;
                 vec![Effect::Stop]
             }
-            // Repeated requests do not retry a failure; release/request is the explicit reset.
-            // Completions from stopped or superseded generations are ignored.
+            // Route synchronization must not retry failures on every workspace edit.
+            // Only reconciliation/manual recovery retries; obsolete completions are ignored.
             _ => vec![],
         }
     }

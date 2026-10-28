@@ -351,10 +351,14 @@ impl Render for BranchView {
                 panel.child(div().text_color(theme.error).child(error))
             })
             .child(header)
-            .when_some(
-                self.repository.read(cx).watch_error(cx).map(str::to_owned),
-                |panel, error| panel.child(div().text_color(theme.error).child(error)),
-            )
+            .when_some(self.repository.read(cx).watch_notice(cx), |panel, error| {
+                panel.child(
+                    div()
+                        .debug_selector(|| "watch-recovery-notice".into())
+                        .text_color(theme.error)
+                        .child(error),
+                )
+            })
             .when(
                 self.repository.read(cx).snapshot(cx).is_refreshing(),
                 |panel| {

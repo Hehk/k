@@ -2,6 +2,8 @@ use crate::workspace::{LoadedWorkspace, Workspace};
 use gpui::{AppContext, TestAppContext};
 use kestrel::{git::Repository, storage::Store};
 
+mod recovery;
+
 #[gpui::test]
 fn recovered_snapshot_keeps_its_common_directory_watcher_and_retargets_pending_reads(
     cx: &mut TestAppContext,
