@@ -18,7 +18,7 @@ use crate::{
     appearance::{DiffTone, Theme},
     controls::{control, tooltip},
     diff_selection::{CopySelection, DiffSelection, ROW_HEIGHT as DIFF_ROW_HEIGHT, RowSource},
-    repository_model::{RepositoryModel, branch_label, open},
+    repository_model::{RefRead, RepositoryModel, branch_label, open},
 };
 
 mod gutter;
@@ -54,6 +54,7 @@ pub struct ComparisonView {
     review_task: Option<Task<()>>,
     review_revision: u64,
     review_request: Option<ReviewRequest>,
+    freshness_snapshot: Option<RefRead>,
     patch_key: Option<FileChange>,
     patch: Query<LoadedPatch>,
     patch_task: Option<PendingPatch>,
@@ -105,6 +106,7 @@ struct ReviewData {
     comparison: Comparison,
     changes: Vec<FileChange>,
     fresh: bool,
+    freshness_read: RefRead,
 }
 
 struct DiffRow {
@@ -286,6 +288,7 @@ impl ComparisonView {
             review_task: None,
             review_revision: 0,
             review_request: None,
+            freshness_snapshot: None,
             patch_key: None,
             patch: Query::new(),
             patch_task: None,
@@ -350,14 +353,27 @@ impl ComparisonView {
     }
 
     fn refresh_review(&mut self, cx: &mut Context<Self>) {
-        if let Some(snapshot) = self.repository.read(cx).snapshot(cx).data()
+        let repository = self.repository.read(cx);
+        if let Some(observed) = repository.snapshot_read(cx)
+            && self.freshness_snapshot != Some(observed)
+            && let Some(snapshot) = repository.snapshot(cx).data()
             && let Some(data) = self.review.data_mut()
         {
-            data.fresh = snapshot.branches.iter().any(|branch| {
-                branch.name == data.comparison.branch && branch.tip == data.comparison.commits.new
-            }) && snapshot.branches.iter().any(|branch| {
-                branch.name == data.comparison.base && branch.tip == data.comparison.base_tip
-            });
+            self.freshness_snapshot = Some(observed);
+            if observed.started > data.freshness_read.finished {
+                data.fresh = snapshot.branches.iter().any(|branch| {
+                    branch.name == data.comparison.branch
+                        && branch.tip == data.comparison.commits.new
+                }) && snapshot.branches.iter().any(|branch| {
+                    branch.name == data.comparison.base && branch.tip == data.comparison.base_tip
+                });
+                data.freshness_read = observed;
+            } else if observed.finished >= data.freshness_read.started {
+                // Overlapping Git reads have no reliable order. Reconcile once rather than
+                // letting completion order choose between the snapshot and Load latest.
+                self.repository
+                    .update(cx, |repository, cx| repository.refresh(cx));
+            }
         }
         if self.review_key.is_some() && self.review.is_pending() && !self.review.is_fetching() {
             self.load_review(None, false, cx);
@@ -420,6 +436,7 @@ impl ComparisonView {
     fn start_review(&mut self, request: ReviewRequest, cx: &mut Context<Self>) {
         // Request intent is transient; only a successful completion may commit pins or history.
         self.review_request = Some(request.clone());
+        self.freshness_snapshot = None;
         self.review_revision += 1;
         let revision = self.review_revision;
         self.patch_revision += 1;
@@ -458,14 +475,16 @@ impl ComparisonView {
                     let changes = repository
                         .changes(&comparison.commits)
                         .map_err(|error| error.to_string())?;
-                    let fresh = repository
-                        .freshness(&comparison)
+                    let (freshness, freshness_read) =
+                        RefRead::record(|| repository.freshness(&comparison));
+                    let fresh = freshness
                         .map_err(|error| error.to_string())?
                         .matches(&comparison);
                     Ok::<_, String>(ReviewData {
                         comparison,
                         changes,
                         fresh,
+                        freshness_read,
                     })
                 })
                 .await;
@@ -510,6 +529,7 @@ impl ComparisonView {
                     self.review_key = self.current_key(cx);
                     self.review_request = None;
                     self.review.complete(Ok(data));
+                    self.refresh_review(cx);
                     self.load_patch(cx);
                 }
             }
